@@ -64,8 +64,16 @@ USER_AGENT = (
 
 
 def _build_launch_args(headless):
-    """Cờ Chromium: chống 'ngủ' khi cửa sổ mất focus/bị che, ẩn cờ webdriver;
-    thêm WebGL phần mềm khi chạy ẩn để vmake xử lý được video."""
+    """
+    Cờ Chromium. `headless=True` ở đây nghĩa là CHẠY ẨN kiểu 'new headless'
+    (--headless=new) trên FULL Chromium:
+      * KHÔNG có cửa sổ OS -> KHÔNG có khái niệm 'minimize' -> requestAnimationFrame/
+        WebGL của vmake KHÔNG bị Chrome bóp khi người dùng thu nhỏ / đi làm việc khác.
+        Đây là fix GỐC cho lỗi "đợi lâu" khi minimize (kể cả Win+D show desktop).
+      * Dùng full Chromium + '--headless=new' (KHÔNG phải headless-shell phần mềm mặc
+        định của Playwright) nên VẪN chạy được GPU -> xử lý NHANH; máy thiếu GPU thì
+        tự lui về WebGL phần mềm (SwiftShader) -> vẫn chạy, chỉ chậm hơn.
+    """
     args = [
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
@@ -78,10 +86,10 @@ def _build_launch_args(headless):
     ]
     if headless:
         args += [
-            "--enable-unsafe-swiftshader",
-            "--ignore-gpu-blocklist",
-            "--use-gl=angle",
-            "--use-angle=swiftshader",
+            "--headless=new",          # chạy ẩn kiểu mới trên FULL Chromium (còn GPU)
+            "--use-gl=angle",          # ANGLE -> D3D11 (GPU thật) trên Windows -> nhanh
+            "--ignore-gpu-blocklist",  # cho dùng GPU kể cả khi bị blocklist
+            "--enable-unsafe-swiftshader",  # thiếu GPU -> lui về WebGL phần mềm (vẫn chạy)
         ]
     return args
 
@@ -91,8 +99,12 @@ def _launch_browser(p, headless, proxy=None):
     Mở trình duyệt — ưu tiên CHROME THẬT (channel='chrome') cho vân tay giống
     người dùng (khó bị vmake nhận diện là bot hơn Chromium đóng gói). Nếu máy
     không có Chrome thì dùng Chromium đóng gói. `proxy` (dict Playwright) nếu có.
+
+    LƯU Ý: LUÔN để Playwright headless=False. Chế độ ẩn được thực hiện bằng cờ
+    '--headless=new' trong args (full Chromium + GPU), KHÔNG dùng headless-shell
+    phần mềm mặc định của Playwright (không GPU -> chậm, dễ timeout với vmake).
     """
-    kw = dict(headless=headless, args=_build_launch_args(headless))
+    kw = dict(headless=False, args=_build_launch_args(headless))
     if proxy:
         kw["proxy"] = proxy
     try:

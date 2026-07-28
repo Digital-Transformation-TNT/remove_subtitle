@@ -261,7 +261,10 @@ class PipelineWorker(QThread):
                     jobs.append((seg["file"], dst))
             self.log(f"Bắt đầu xử lý vmake: {len(jobs)} đoạn (chế độ {c['vmake_mode']}).")
             self.log(f"Nghỉ ngẫu nhiên giữa các đoạn: {c['delay_min']:.0f}–{c['delay_max']:.0f}s.")
-            self.log("Cửa sổ trình duyệt sẽ mở ra. Đừng đóng tới khi xong.")
+            if c["headless"]:
+                self.log("Chạy ẩn (không mở cửa sổ) — cứ thu nhỏ / làm việc khác, vẫn xử lý bình thường.")
+            else:
+                self.log("Cửa sổ trình duyệt sẽ mở ra. Đừng đóng tới khi xong.")
             total = len(jobs)
             # Batch = ĐÚNG số đoạn video bị cắt ra (xử lý hết trong 1 lượt), nhưng
             # chặn trần 15 để không mở quá nhiều task song song gây nặng máy/vmake.
@@ -504,7 +507,13 @@ class MainWindow(QMainWindow):
         self.cmb_mode.addItem("Tự động", "auto")
         self.cmb_mode.addItem("Bán tự động", "semi")
         og.addWidget(self.cmb_mode, 2, 1)
-        self.cb_headless = QCheckBox("Ẩn trình duyệt (headless)")
+        self.cb_headless = QCheckBox("Chạy ẩn (khuyên dùng)")
+        self.cb_headless.setChecked(True)   # mặc định ẩn -> thu nhỏ/làm việc khác vẫn xử lý
+        self.cb_headless.setToolTip(
+            "Chạy ẩn (không mở cửa sổ trình duyệt). KHUYÊN DÙNG: không có cửa sổ nên "
+            "không bị lỗi 'đợi lâu' khi bạn thu nhỏ / đi làm việc khác. Vẫn dùng GPU "
+            "nên không chậm. Chỉ bỏ chọn nếu muốn NHÌN trình duyệt chạy để soi lỗi."
+        )
         og.addWidget(self.cb_headless, 2, 2)
 
         og.addWidget(QLabel("Loại xoá (chế độ Tự động):"), 3, 0)
@@ -655,7 +664,7 @@ class MainWindow(QMainWindow):
         ridx = self.cmb_removal.findData(cfg.get("removal_type", "Smart"))
         if ridx >= 0:
             self.cmb_removal.setCurrentIndex(ridx)
-        self.cb_headless.setChecked(cfg.get("headless", False))
+        self.cb_headless.setChecked(cfg.get("headless", True))
         self.sp_timeout.setValue(cfg.get("timeout", 300))
         self.sp_delay_min.setValue(cfg.get("delay_min", 1.0))
         self.sp_delay_max.setValue(cfg.get("delay_max", 2.0))
