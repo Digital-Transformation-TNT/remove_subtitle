@@ -1159,8 +1159,10 @@ def _run_batch(page, pending, removal_type, batch_size,
                     _interruptible_sleep(gap, should_stop)
                     if should_stop():
                         break
-                # Nạp file + XÁC NHẬN có card mới -> đoạn CHẮC CHẮN đã lên.
-                _batch_upload(page, src, log)
+                # Nạp file + XÁC NHẬN có card mới -> đoạn CHẮC CHẮN đã lên. Lấy LUÔN
+                # card vừa tạo (vmake chèn lên đầu) để thao tác NGAY, KHÔNG chờ nhãn
+                # tên render (~15–20s) như trước — đây là nút thắt tốc độ lớn nhất.
+                new_card = _batch_upload(page, src, log)
                 uploaded_any = True
                 # TRACK NGAY sau khi card đã lên (TRƯỚC bước chọn loại): mọi trục
                 # trặc chọn-loại về sau KHÔNG khiến up trùng đoạn này -> không sinh
@@ -1169,30 +1171,27 @@ def _run_batch(page, pending, removal_type, batch_size,
                 in_flight[name] = {"src": src, "dst": dst, "t0": time.time()}
                 log(f"  [+] Up '{name}' — đang xử lý {len(in_flight)}/{batch_size}")
                 if not is_smart:
-                    # Loại ≠ Smart: chờ nhãn tên hiện rồi chọn loại + Apply để vmake
-                    # BẮT ĐẦU xử lý. Nhãn render trễ (có thể ~15–20s) -> chờ rộng tay.
-                    card = _wait_task_card(page, name, timeout=90)
-                    if card is not None:
-                        if not _apply_type_in_card(page, card, removal_type, log):
-                            # KHÔNG bấm được Apply -> card sẽ NẰM IM tới hết timeout
-                            # (lãng phí vài phút). Card chưa chạy nên XOÁ + xử lý lại
-                            # NGAY cho nhanh, thay vì chờ nhánh "quá lâu".
-                            c = _leaf_card_by_name(page, name) or card
-                            try:
-                                _delete_card(page, c, log, name=name)
-                            except Exception:
-                                pass
-                            del in_flight[name]
-                            attempts[name] = attempts.get(name, 0) + 1
-                            if attempts[name] >= MAX_ATTEMPTS:
-                                failed.append(name)
-                                log(f"  [BỎ QUA] '{name}' không Apply được {MAX_ATTEMPTS} lần — chạy tiếp đoạn khác.")
-                            else:
-                                log(f"  '{name}' chưa Apply được — xoá & xử lý lại ngay (đỡ chờ timeout).")
-                                pending.append((src, dst))
-                            break
-                    else:
-                        log(f"  (chưa thấy nhãn '{name}' để chọn loại — chờ xử lý, làm lại nếu quá lâu)")
+                    # Loại ≠ Smart: chọn loại + Apply NGAY trên card vừa tạo để vmake
+                    # BẮT ĐẦU xử lý. _apply_type_in_card tự chờ thẻ loại hiện (nhanh,
+                    # ~2s). KHÔNG cần chờ nhãn TÊN ở đây — nhãn chỉ cần lúc TẢI (đối
+                    # chiếu theo tên), lúc ấy xử lý xong nên nhãn chắc chắn đã render.
+                    if not _apply_type_in_card(page, new_card, removal_type, log):
+                        # KHÔNG bấm được Apply -> card sẽ NẰM IM tới hết timeout (lãng
+                        # phí vài phút). Card chưa chạy nên XOÁ + xử lý lại NGAY.
+                        c = _leaf_card_by_name(page, name) or new_card
+                        try:
+                            _delete_card(page, c, log, name=name)
+                        except Exception:
+                            pass
+                        del in_flight[name]
+                        attempts[name] = attempts.get(name, 0) + 1
+                        if attempts[name] >= MAX_ATTEMPTS:
+                            failed.append(name)
+                            log(f"  [BỎ QUA] '{name}' không Apply được {MAX_ATTEMPTS} lần — chạy tiếp đoạn khác.")
+                        else:
+                            log(f"  '{name}' chưa Apply được — xoá & xử lý lại ngay (đỡ chờ timeout).")
+                            pending.append((src, dst))
+                        break
             except Exception as e:
                 if name in in_flight:
                     # Card ĐÃ lên & đang track; lỗi chỉ ở bước chọn loại/Apply. TUYỆT
