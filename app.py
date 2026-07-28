@@ -527,12 +527,15 @@ class MainWindow(QMainWindow):
         delay_w = QWidget()
         dh = QHBoxLayout(delay_w)
         dh.setContentsMargins(0, 0, 0, 0)
+        # Giãn cách NGẪU NHIÊN giữa các lần up để không dồn nhiều video lên vmake
+        # cùng lúc (dồn quá -> đoạn kẹt "Processing" tới timeout). Vài giây là đủ;
+        # tool tự chặn trần ~8s nên đặt lớn cũng không treo lâu.
         self.sp_delay_min = QDoubleSpinBox()
         self.sp_delay_min.setRange(1.0, 3600.0)
-        self.sp_delay_min.setValue(1.0)
+        self.sp_delay_min.setValue(2.0)
         self.sp_delay_max = QDoubleSpinBox()
         self.sp_delay_max.setRange(1.0, 3600.0)
-        self.sp_delay_max.setValue(50.0)
+        self.sp_delay_max.setValue(5.0)
         dh.addWidget(QLabel("min"))
         dh.addWidget(self.sp_delay_min)
         dh.addWidget(QLabel("max"))
@@ -654,8 +657,8 @@ class MainWindow(QMainWindow):
             self.cmb_removal.setCurrentIndex(ridx)
         self.cb_headless.setChecked(cfg.get("headless", False))
         self.sp_timeout.setValue(cfg.get("timeout", 300))
-        self.sp_delay_min.setValue(cfg.get("delay_min", 1.0))
-        self.sp_delay_max.setValue(cfg.get("delay_max", 50.0))
+        self.sp_delay_min.setValue(cfg.get("delay_min", 2.0))
+        self.sp_delay_max.setValue(cfg.get("delay_max", 5.0))
         self.sp_batch.setValue(int(cfg.get("batch_size", 10)))
         # --- proxy/tor đã ẩn — không nạp ed_proxies/cb_tor/tor_* nữa ---
 

@@ -746,8 +746,19 @@ SINGLE_FILE_INPUT_SELECTOR = 'input[type="file"]:not([multiple])'
 # đó, file bị NUỐT IM LẶNG: set_input_files vẫn "thành công", nhưng không có card
 # nào sinh ra -> chính là lỗi "không thấy card '...' sau khi up". Cách trị: nạp
 # xong XÁC NHẬN có card mới (card hiện sau ~0.5s), chưa có thì nạp lại ngay.
-UPLOAD_CONFIRM_S = 2.0   # cửa sổ chờ card mới (đo thực tế: 0.4–0.7s)
-UPLOAD_TRIES = 4         # đo thực tế: lần 2 luôn ăn
+#
+# CỬA SỔ CHỜ phải RỘNG TAY: card thường hiện ~0.4–0.7s, nhưng khi máy chậm / mạng
+# lag / đang chạy nhiều video song song thì có thể vài giây. Nếu để cửa sổ quá hẹp
+# (vd 2s) mà card render trễ, ta tưởng "bị nuốt" rồi NẠP LẠI -> sinh CARD TRÙNG:
+# 2 card cùng 1 đoạn -> vượt batch_size -> vmake xử lý dồn -> đoạn kẹt "Processing"
+# mãi tới timeout. Vì _wait_new_card poll 150ms và TRẢ VỀ NGAY khi thấy card, để
+# cửa sổ rộng gần như miễn phí ở ca thường mà chặn được nạp-trùng.
+UPLOAD_CONFIRM_S = 8.0   # cửa sổ chờ card mới (thường thấy trong <1s; rộng để tránh nạp trùng)
+UPLOAD_TRIES = 4         # nuốt thật (rất hiếm) mới cần nạp lại
+
+# Trần thời gian GIÃN CÁCH giữa các lần up (giây). Đủ để de-clump tránh dồn vmake
+# mà không treo lâu, kể cả khi cấu hình để delay_max lớn.
+STAGGER_CAP_S = 8.0
 
 
 def _wait_new_card(page, before, timeout=UPLOAD_CONFIRM_S):
@@ -909,34 +920,92 @@ def _clear_all_task_cards(page, log, max_clear=80):
     return left
 
 
-def _apply_type_in_card(page, card, removal_type, log):
-    """Loại ≠ Smart: chọn thẻ loại TRONG card rồi bấm 'Apply' để bắt đầu xử lý."""
-    pat = re.compile(rf"^\s*{re.escape(removal_type)}\s*$", re.I)
+def _is_visible(loc):
     try:
-        t = card.get_by_text(pat).first
-        t.wait_for(state="visible", timeout=8000)
-        t.click(timeout=4000)
-        log(f"  Chọn loại '{removal_type}' trong card.")
+        return loc.is_visible()
     except Exception:
-        log(f"  (Không thấy thẻ '{removal_type}' trong card — bỏ qua)")
-    page.wait_for_timeout(500)
-    # Nút 'Apply' render sau khi chọn loại -> chờ tới khi hiện rồi bấm (thử vài lần).
-    applied = False
-    for _ in range(6):
+        return False
+
+
+def _find_apply_button(page, card):
+    """
+    Tìm nút 'Apply' của card vừa chọn loại. Ưu tiên TRONG card; nếu không có (vmake
+    đôi khi render Apply ở lớp ngoài card), thử TOÀN TRANG nhưng CHỈ khi đang hiện
+    ĐÚNG 1 nút Apply (tránh bấm nhầm Apply của card khác lúc chạy song song).
+    """
+    for scope, page_level in ((card, False), (page, True)):
         try:
-            ap = card.get_by_role("button", name=re.compile(r"\bApply\b", re.I)).first
+            ap = scope.get_by_role("button", name=re.compile(r"\bApply\b", re.I))
             if ap.count() == 0:
-                ap = card.get_by_text(re.compile(r"\bApply\b", re.I)).first
-            if ap.count() > 0 and ap.is_visible():
-                ap.click(timeout=4000)
+                ap = scope.get_by_text(re.compile(r"^\s*Apply\s*$", re.I))
+            vis = [ap.nth(i) for i in range(ap.count()) if _is_visible(ap.nth(i))]
+        except Exception:
+            continue
+        if not page_level and vis:
+            return vis[0]          # trong card: lấy cái đầu
+        if page_level and len(vis) == 1:
+            return vis[0]          # toàn trang: chỉ khi duy nhất
+    return None
+
+
+def _apply_type_in_card(page, card, removal_type, log):
+    """
+    Loại ≠ Smart: chọn thẻ loại TRONG card rồi bấm 'Apply' để BẮT ĐẦU xử lý.
+    Trả về True nếu đã bấm được Apply.
+
+    Nút 'Apply' render SAU khi chọn loại và đôi khi TRỄ (nhất là lúc chạy nhiều
+    card song song, ~4.8s như cũ là không đủ -> card nằm im tới timeout). Vì vậy
+    chờ RỘNG TAY (~24s) và CHỌN LẠI loại 1 lần ở giữa (phòng cú click loại đầu
+    không ăn nên Apply không hiện).
+    """
+    def _select_type():
+        pat = re.compile(rf"^\s*{re.escape(removal_type)}\s*$", re.I)
+        try:
+            t = card.get_by_text(pat).first
+            t.wait_for(state="visible", timeout=8000)
+            t.click(timeout=4000)
+            log(f"  Chọn loại '{removal_type}' trong card.")
+            return True
+        except Exception:
+            log(f"  (Không thấy thẻ '{removal_type}' trong card — bỏ qua)")
+            return False
+
+    _select_type()
+    page.wait_for_timeout(500)
+    reselected = False
+    for i in range(30):                     # 30 * 0.8s ≈ 24s
+        btn = _find_apply_button(page, card)
+        if btn is not None:
+            try:
+                btn.click(timeout=4000)
                 log("  Đã bấm Apply.")
-                applied = True
-                break
+                return True
+            except Exception:
+                pass
+        if i == 12 and not reselected:      # ~10s vẫn chưa thấy -> chọn lại loại
+            reselected = True
+            _select_type()
+        page.wait_for_timeout(800)
+    log("  (Không thấy nút Apply trong card)")
+    return False
+
+
+def _wait_single_input(page, timeout=8):
+    """
+    Chờ ô upload ĐƠN (input[type=file]:not([multiple])) hiện lại rồi trả về
+    locator.first — vmake DỰNG LẠI input sau mỗi lần up nên đôi khi phải chờ vài
+    trăm ms. Trả về None nếu quá hạn (thực sự không có ô).
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            loc = page.locator(SINGLE_FILE_INPUT_SELECTOR)
+            if loc.count() > 0:
+                return loc.first
         except Exception:
             pass
-        page.wait_for_timeout(800)
-    if not applied:
-        log("  (Không thấy nút Apply trong card)")
+        page.wait_for_timeout(200)
+    return None
 
 
 def _batch_upload(page, src, log):
@@ -951,22 +1020,28 @@ def _batch_upload(page, src, log):
     """
     name = os.path.basename(src)
     for attempt in range(1, UPLOAD_TRIES + 1):
-        loc = page.locator(SINGLE_FILE_INPUT_SELECTOR)
-        try:
-            gone = loc.count() == 0
-        except Exception:
-            gone = True
-        if gone:
-            # Mất ô upload (trang bị lạc sang chỗ khác) -> mở lại trang upload.
-            log("  Không thấy ô upload — mở lại trang upload.")
-            page.goto(UPLOAD_URL, wait_until="domcontentloaded")
-            _wait_dom_ready(page)
-            _dismiss_overlays(page, log)
-            loc = page.locator(SINGLE_FILE_INPUT_SELECTOR)
+        inp = _wait_single_input(page, timeout=8)
+        if inp is None:
+            # Ô upload biến mất. TUYỆT ĐỐI KHÔNG reload trang khi CÒN card đang xử
+            # lý: page.goto() nạp lại trang -> XOÁ SẠCH mọi card in-flight (mất các
+            # video đang chạy song song). Còn card -> chỉ chờ ô hiện lại. Chỉ khi
+            # KHÔNG còn card nào (an toàn) mới mở lại trang upload.
+            if _leaf_cards(page):
+                inp = _wait_single_input(page, timeout=20)
+            if inp is None and not _leaf_cards(page):
+                log("  Không thấy ô upload — mở lại trang upload.")
+                page.goto(UPLOAD_URL, wait_until="domcontentloaded")
+                _wait_dom_ready(page)
+                _dismiss_overlays(page, log)
+                inp = _wait_single_input(page, timeout=8)
+            if inp is None:
+                log(f"  (chưa thấy ô upload cho '{name}' lần {attempt}/{UPLOAD_TRIES})")
+                page.wait_for_timeout(500)
+                continue
 
         before = len(_leaf_cards(page))
         try:
-            loc.first.set_input_files(src, timeout=8000)
+            inp.set_input_files(src, timeout=8000)
         except Exception as e:
             log(f"  (nạp '{name}' lỗi lần {attempt}/{UPLOAD_TRIES}: {str(e)[:70]})")
             page.wait_for_timeout(500)
@@ -1065,6 +1140,7 @@ def _run_batch(page, pending, removal_type, batch_size,
     in_flight = {}   # name -> {"src","dst","t0"}
     failed = []      # đoạn lỗi quá số lần -> BỎ QUA (không dừng cả mẻ)
     done = 0
+    uploaded_any = False   # đã up ít nhất 1 đoạn -> mới cần giãn cách giữa các lần
 
     while (pending or in_flight) and not should_stop():
         # 1) Up bù cho đủ batch_size.
@@ -1072,17 +1148,58 @@ def _run_batch(page, pending, removal_type, batch_size,
             src, dst = pending.pop(0)
             name = os.path.basename(src)
             try:
-                # Đã xác nhận có card mới -> đoạn CHẮC CHẮN đã lên.
+                # GIÃN CÁCH giữa các lần up: nếu nạp dồn dập, vmake nhận nhiều video
+                # cùng lúc -> xử lý phía client bị dồn -> đoạn kẹt "Processing" tới
+                # timeout. Nghỉ ngẫu nhiên delay_min..delay_max trước mỗi lần up kế
+                # (không nghỉ trước đoạn đầu tiên). CHẶN TRẦN STAGGER_CAP_S để dù cấu
+                # hình cũ để delay lớn (mặc định cũ tới 50s) cũng KHÔNG treo cả chục
+                # phút chỉ để giãn cách. Ngắt được nếu người dùng dừng.
+                if uploaded_any:
+                    gap = min(random.uniform(delay_min, delay_max), STAGGER_CAP_S)
+                    _interruptible_sleep(gap, should_stop)
+                    if should_stop():
+                        break
+                # Nạp file + XÁC NHẬN có card mới -> đoạn CHẮC CHẮN đã lên.
                 _batch_upload(page, src, log)
-                if not is_smart:
-                    # Loại ≠ Smart phải bấm đúng card -> chờ nhãn tên hiện.
-                    card = _wait_task_card(page, name, timeout=45)
-                    if card is None:
-                        raise RuntimeError(f"không thấy tên '{name}' trên card để chọn loại")
-                    _apply_type_in_card(page, card, removal_type, log)
+                uploaded_any = True
+                # TRACK NGAY sau khi card đã lên (TRƯỚC bước chọn loại): mọi trục
+                # trặc chọn-loại về sau KHÔNG khiến up trùng đoạn này -> không sinh
+                # card thừa gây quá tải. Nếu card không chạy được sẽ được nhánh
+                # "quá lâu" xoá + xử lý lại SẠCH (không chồng card).
                 in_flight[name] = {"src": src, "dst": dst, "t0": time.time()}
                 log(f"  [+] Up '{name}' — đang xử lý {len(in_flight)}/{batch_size}")
+                if not is_smart:
+                    # Loại ≠ Smart: chờ nhãn tên hiện rồi chọn loại + Apply để vmake
+                    # BẮT ĐẦU xử lý. Nhãn render trễ (có thể ~15–20s) -> chờ rộng tay.
+                    card = _wait_task_card(page, name, timeout=90)
+                    if card is not None:
+                        if not _apply_type_in_card(page, card, removal_type, log):
+                            # KHÔNG bấm được Apply -> card sẽ NẰM IM tới hết timeout
+                            # (lãng phí vài phút). Card chưa chạy nên XOÁ + xử lý lại
+                            # NGAY cho nhanh, thay vì chờ nhánh "quá lâu".
+                            c = _leaf_card_by_name(page, name) or card
+                            try:
+                                _delete_card(page, c, log, name=name)
+                            except Exception:
+                                pass
+                            del in_flight[name]
+                            attempts[name] = attempts.get(name, 0) + 1
+                            if attempts[name] >= MAX_ATTEMPTS:
+                                failed.append(name)
+                                log(f"  [BỎ QUA] '{name}' không Apply được {MAX_ATTEMPTS} lần — chạy tiếp đoạn khác.")
+                            else:
+                                log(f"  '{name}' chưa Apply được — xoá & xử lý lại ngay (đỡ chờ timeout).")
+                                pending.append((src, dst))
+                            break
+                    else:
+                        log(f"  (chưa thấy nhãn '{name}' để chọn loại — chờ xử lý, làm lại nếu quá lâu)")
             except Exception as e:
+                if name in in_flight:
+                    # Card ĐÃ lên & đang track; lỗi chỉ ở bước chọn loại/Apply. TUYỆT
+                    # ĐỐI KHÔNG up lại (sẽ sinh card trùng) — giữ nguyên, để nhánh
+                    # "quá lâu" dọn + làm lại sạch nếu card không xử lý được.
+                    log(f"  (lỗi sau khi '{name}' đã lên: {str(e)[:80]} — giữ card, xử lý tiếp)")
+                    break
                 attempts[name] = attempts.get(name, 0) + 1
                 log(f"  Lỗi up '{name}' (lần {attempts[name]}/{MAX_ATTEMPTS}): {e}")
                 if attempts[name] >= MAX_ATTEMPTS:
