@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QRadioButton, QButtonGroup,
     QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox, QGroupBox, QPlainTextEdit,
-    QProgressBar, QMessageBox, QFrame, QTabWidget,
+    QProgressBar, QMessageBox, QFrame, QTabWidget, QSystemTrayIcon,
 )
 
 from tnt_license import check_license
@@ -178,6 +178,7 @@ class PipelineWorker(QThread):
     sig_progress = Signal(int, int)
     sig_done = Signal(str)
     sig_error = Signal(str)
+    sig_file_done = Signal(str, str)   # (tên video, đường dẫn file kết quả) -> báo popup
 
     def __init__(self, cfg):
         super().__init__()
@@ -318,6 +319,8 @@ class PipelineWorker(QThread):
                                   audio_files=audio_files)
                 self.log(f"  -> {out_path}")
                 self.sig_progress.emit(vi, len(vids))
+                # Báo popup: XONG 1 file (video hoàn chỉnh vừa ghép xong).
+                self.sig_file_done.emit(v["name"], out_path)
             self.log(f"Video hoàn chỉnh nằm trong: {final_root}")
 
 
@@ -402,6 +405,16 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.login_worker = None
         self.proxy_fetcher = None
+        self._popups = []          # giữ tham chiếu popup không-chặn (khỏi bị dọn rác)
+        # Icon khay hệ thống để hiện thông báo "xong 1 file" (kể cả khi thu nhỏ).
+        self._tray = None
+        try:
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                self._tray = QSystemTrayIcon(self.windowIcon(), self)
+                self._tray.setToolTip("TNT — Tách & Xoá phụ đề video")
+                self._tray.show()
+        except Exception:
+            self._tray = None
         self._build_ui()
         self._apply_cfg(load_config())
         self._update_session_label()
@@ -525,7 +538,6 @@ class MainWindow(QMainWindow):
         self.cmb_removal.addItem("Smart (xoá thông minh)", "Smart")
         self.cmb_removal.addItem("Subtitle (phụ đề)", "Subtitle")
         self.cmb_removal.addItem("Watermark", "Watermark")
-        self.cmb_removal.addItem("Passerby (người qua đường)", "Passerby")
         og.addWidget(self.cmb_removal, 3, 1, 1, 2)
 
         og.addWidget(QLabel("Timeout mỗi đoạn (giây):"), 4, 0)
@@ -666,8 +678,8 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.cmb_mode.setCurrentIndex(idx)
         ridx = self.cmb_removal.findData(cfg.get("removal_type", "Smart"))
-        if ridx >= 0:
-            self.cmb_removal.setCurrentIndex(ridx)
+        # Cấu hình cũ có thể lưu 'Passerby' (đã bỏ) -> không tìm thấy -> về Smart.
+        self.cmb_removal.setCurrentIndex(ridx if ridx >= 0 else 0)
         self.cb_headless.setChecked(cfg.get("headless", True))
         self.sp_timeout.setValue(cfg.get("timeout", 300))
         self.sp_delay_min.setValue(cfg.get("delay_min", 1.0))
@@ -789,6 +801,7 @@ class MainWindow(QMainWindow):
         self.worker.sig_progress.connect(self.set_progress)
         self.worker.sig_done.connect(self.on_done)
         self.worker.sig_error.connect(self.on_error)
+        self.worker.sig_file_done.connect(self.on_file_done)
         self.worker.start()
 
     def stop(self):
@@ -802,6 +815,38 @@ class MainWindow(QMainWindow):
         self.progress.setValue(1)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+
+    def on_file_done(self, name, path):
+        """Hiện thông báo KHI XONG 1 video (không chặn xử lý các video còn lại)."""
+        title = "✅ Xong 1 video"
+        body = f"Đã xử lý xong: {name}"
+        shown = False
+        # Ưu tiên thông báo khay hệ thống (toast) — hiện cả khi cửa sổ đang thu nhỏ.
+        if self._tray is not None:
+            try:
+                self._tray.showMessage(title, f"{body}\n{path}",
+                                       QSystemTrayIcon.Information, 8000)
+                shown = True
+            except Exception:
+                shown = False
+        # Không có khay -> popup KHÔNG chặn luồng (non-modal), nổi lên trên.
+        if not shown:
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setText(body)
+            box.setInformativeText(path)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            box.setModal(False)
+            box.finished.connect(lambda _=None, b=box: self._popups.remove(b)
+                                 if b in self._popups else None)
+            self._popups.append(box)
+            box.show()
+        # Nháy taskbar để chú ý dù đang làm việc khác.
+        try:
+            QApplication.alert(self)
+        except Exception:
+            pass
 
     def on_error(self, msg):
         self.append_log("LỖI: " + msg)

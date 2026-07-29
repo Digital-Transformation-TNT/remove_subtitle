@@ -48,7 +48,7 @@ FILE_INPUT_SELECTOR = 'input[type="file"]'
 UPLOAD_BUTTON_TEXTS = ["Upload", "Drag", "Click", "Tải lên", "Chọn"]
 # Các loại xoá ở tab "Auto" của vmake. Người dùng chọn trên giao diện app;
 # loại đang chọn được truyền vào process_videos qua tham số `removal_type`.
-REMOVAL_TYPES = ["Smart", "Subtitle", "Watermark", "Passerby"]
+REMOVAL_TYPES = ["Smart", "Subtitle", "Watermark"]   # 'Passerby' đã bỏ (không dùng được)
 # Nút tải MIỄN PHÍ: "Download 5s preview video". Khớp riêng chữ "preview" để
 # KHÔNG bấm nhầm "Download full video" (bản trả phí).
 DOWNLOAD_PREVIEW_TEXTS = ["preview"]
