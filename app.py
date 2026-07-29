@@ -266,10 +266,14 @@ class PipelineWorker(QThread):
             else:
                 self.log("Cửa sổ trình duyệt sẽ mở ra. Đừng đóng tới khi xong.")
             total = len(jobs)
-            # Batch = ĐÚNG số đoạn video bị cắt ra (xử lý hết trong 1 lượt), nhưng
-            # chặn trần 15 để không mở quá nhiều task song song gây nặng máy/vmake.
-            auto_batch = min(total, 15)
-            self.log(f"Batch tự động = {auto_batch} (theo số đoạn, tối đa 15).")
+            # SỐ ĐOẠN XỬ LÝ SONG SONG. vmake xử lý PHÍA CLIENT (WebGL) nên mọi đoạn
+            # song song DÙNG CHUNG 1 GPU trình duyệt: mở quá nhiều -> GPU dồn -> đoạn
+            # cuối/áp chót đói tài nguyên, xử lý mãi không xong trong timeout -> bị bỏ
+            # (đúng triệu chứng "1 đoạn quá lâu"). Nạp dồn dập cũng dễ bị vmake bóp.
+            # -> chặn trần THẤP (4) cho ổn định; pipeline vẫn đẩy đoạn kế khi 1 đoạn
+            # xong nên không nghỉ máy. (Tăng nếu máy khỏe & muốn nhanh hơn.)
+            auto_batch = min(total, 4)
+            self.log(f"Batch tự động = {auto_batch} (song song tối đa 4 cho ổn định).")
             processed = vmake_client.process_videos(
                 jobs, mode=c["vmake_mode"], headless=c["headless"],
                 per_video_timeout=c["timeout"],
