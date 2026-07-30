@@ -275,12 +275,39 @@ def _app_dir() -> Path:
     return Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
 
 
+def _user_license_dest() -> Path:
+    """
+    Chỗ GHI license khi người dùng bấm 'Chọn file license' (import). Là thư mục ứng
+    dụng cấp NGƯỜI DÙNG (ghi được, KHÔNG cần quyền admin/sudo) và cố định (miễn
+    nhiễm 'App Translocation' của macOS). Phải nằm trong _candidate_paths().
+    """
+    home = Path(os.path.expanduser("~"))
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "TNT" / LICENSE_FILENAME
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or str(home)
+        return Path(base) / "TNT" / LICENSE_FILENAME
+    return home / ".config" / "TNT" / LICENSE_FILENAME
+
+
 def _candidate_paths() -> list[Path]:
+    """
+    Nơi tìm license.key, THEO THỨ TỰ. Gồm nhiều chỗ QUEN THUỘC (Downloads/Desktop/
+    Home/Documents) để người KHÔNG rành kỹ thuật chỉ cần THẢ file vào một trong các
+    chỗ đó — thậm chí để nguyên trong Downloads (nơi file tự tải về) — là chạy được,
+    KHÔNG cần Terminal. Các đường dẫn tuyệt đối này cũng MIỄN NHIỄM 'App
+    Translocation' của macOS (app tải về bị chạy ở thư mục tạm nên không thấy file
+    đặt CẠNH app — đây là lý do 'để cạnh app mà vẫn báo chưa có key').
+    """
+    home = Path(os.path.expanduser("~"))
     paths: list[Path] = []
     env = os.environ.get("TNT_LICENSE_PATH")
     if env:
         paths.append(Path(env))
-    paths.append(_app_dir() / LICENSE_FILENAME)
+    paths.append(_app_dir() / LICENSE_FILENAME)                 # cạnh app (có thể bị translocation)
+    paths.append(_user_license_dest())                          # chỗ import cố định (ghi được)
+    for d in (home / "Downloads", home / "Desktop", home, home / "Documents"):
+        paths.append(d / LICENSE_FILENAME)                      # các chỗ quen thuộc -> thả vào là xong
     if sys.platform.startswith("win"):
         paths.append(Path(COMMON_LICENSE_PATH))
     else:
@@ -441,26 +468,40 @@ def _show_message(title: str, message: str) -> None:
           + "=" * 60, file=sys.stderr)
 
 
+def _import_license_file(src: str) -> Path:
+    """Chép file license user vừa chọn vào chỗ cố định (ghi được, khỏi Terminal).
+    Trả về đường dẫn đích. Ném lỗi nếu chép hỏng."""
+    import shutil
+    dest = _user_license_dest()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dest)
+    return dest
+
+
 def _qt_machine_id_dialog(title: str, reason: str, tool_name: str,
-                          mid_pretty: str, mid_file: "Path | None") -> bool:
+                          mid_pretty: str, mid_file: "Path | None"):
     """
-    Hộp thoại Qt hiện MÃ MÁY + nút 'Copy mã máy' (giúp user lấy mã NHANH).
-    Trả True nếu hiện được bằng Qt, False nếu không có Qt (để fallback).
+    Hộp thoại Qt: hiện MÃ MÁY (+ nút Copy) và nút 'Chọn file license…' để user CHỌN
+    THẲNG file license.key đã nhận — app tự chép vào chỗ cố định (KHỎI Terminal,
+    KHỎI lo để đúng thư mục, miễn nhiễm App Translocation của macOS).
+    Trả về (shown, imported): shown=True nếu hiện được bằng Qt; imported=True nếu
+    user vừa import license (để caller KIỂM LẠI).
     """
     try:
         from PySide6.QtWidgets import (
             QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-            QLineEdit, QPushButton,
+            QLineEdit, QPushButton, QFileDialog, QMessageBox,
         )
         from PySide6.QtGui import QGuiApplication, QFont
         from PySide6.QtCore import Qt
     except Exception:
-        return False
+        return False, False
+    state = {"imported": False}
     try:
         app = QApplication.instance() or QApplication(sys.argv)
         dlg = QDialog()
         dlg.setWindowTitle(title)
-        dlg.setMinimumWidth(520)
+        dlg.setMinimumWidth(560)
         lay = QVBoxLayout(dlg)
 
         lay.addWidget(QLabel(f"<b>{reason}</b>"))
@@ -481,48 +522,90 @@ def _qt_machine_id_dialog(title: str, reason: str, tool_name: str,
             QGuiApplication.clipboard().setText(mid_pretty)
             btn_copy.setText("✓ Đã copy!")
         btn_copy.clicked.connect(_do_copy)
+
+        # NÚT QUAN TRỌNG cho người không rành: đã có license -> chọn thẳng file.
+        btn_import = QPushButton("📂  Đã có license? Chọn file…")
+
+        def _do_import():
+            src, _sel = QFileDialog.getOpenFileName(
+                dlg, "Chọn file license.key đã nhận",
+                os.path.expanduser("~"),
+                "License key (*.key);;Tất cả file (*)",
+            )
+            if not src:
+                return
+            try:
+                _import_license_file(src)
+                state["imported"] = True
+                dlg.accept()
+            except Exception as ex:
+                QMessageBox.critical(dlg, "Lỗi", f"Không chép được license:\n{ex}")
+        btn_import.clicked.connect(_do_import)
+
         btn_close = QPushButton("Thoát")
-        btn_close.clicked.connect(dlg.accept)
+        btn_close.clicked.connect(dlg.reject)
         row.addWidget(btn_copy)
+        row.addWidget(btn_import)
         row.addStretch(1)
         row.addWidget(btn_close)
         lay.addLayout(row)
 
-        note = (f"Sau khi nhận file '{LICENSE_FILENAME}', đặt cạnh chương trình "
-                f"hoặc tại {COMMON_LICENSE_PATH}.")
+        if sys.platform == "darwin":
+            where = ("Cách dễ nhất: bấm nút '📂 Chọn file…' ở trên rồi chọn file "
+                     "license.key vừa nhận. Hoặc để file trong thư mục Downloads / "
+                     "Desktop rồi mở lại app.")
+        elif sys.platform.startswith("win"):
+            where = ("Cách dễ nhất: bấm nút '📂 Chọn file…' ở trên rồi chọn file "
+                     "license.key. Hoặc để file trong Downloads / Desktop / cạnh "
+                     f"chương trình, hoặc {COMMON_LICENSE_PATH}.")
+        else:
+            where = ("Bấm '📂 Chọn file…' rồi chọn license.key, hoặc để file trong "
+                     "Downloads / Desktop.")
+        note = f"Sau khi nhận file '{LICENSE_FILENAME}': {where}"
         if mid_file:
             note += f"\n(Mã máy cũng đã lưu vào: {mid_file})"
         lbl = QLabel(note); lbl.setWordWrap(True)
-        lbl.setStyleSheet("color:#666; font-size:11px;")
+        lbl.setStyleSheet("color:#888; font-size:11px;")
         lay.addWidget(lbl)
 
         dlg.exec()
-        return True
+        return True, state["imported"]
     except Exception:
-        return False
+        return False, state["imported"]
 
 
 def show_machine_id(reason: str = "MÃ MÁY", tool_name: str = "") -> str:
     """
-    Hiện MÃ MÁY (có nút Copy) và ghi machine_id.txt. Trả về mã máy (bản đẹp).
-    Dùng cho: (a) khi thiếu license, (b) tool nhỏ 'Lấy mã máy'.
+    Hiện MÃ MÁY (có nút Copy + Chọn file license) và ghi machine_id.txt. Trả về mã
+    máy (bản đẹp). Dùng cho: (a) khi thiếu license, (b) tool nhỏ 'Lấy mã máy'.
     """
     try:
         mid = machine_id_pretty()
     except Exception:
         mid = "(không đọc được thông tin phần cứng)"
     mid_file = _write_machine_id_file(mid)
-    if not _qt_machine_id_dialog("Mã máy", reason, tool_name, mid, mid_file):
+    shown, _imported = _qt_machine_id_dialog("Mã máy", reason, tool_name, mid, mid_file)
+    if not shown:
         # Fallback không có Qt.
         _show_message("Mã máy",
                       f"{reason}\n\nMÃ MÁY:\n{mid}\n\n(Đã lưu machine_id.txt)")
     return mid
 
 
-def _deny_and_exit(reason: str, tool_name: str) -> "None":
-    """Báo lỗi rõ ràng + hiện mã máy (có nút Copy), rồi THOÁT. Không lộ stack trace."""
-    show_machine_id(reason, tool_name)
-    sys.exit(1)
+def _deny_or_import(reason: str, tool_name: str) -> bool:
+    """
+    Hiện hộp thoại thiếu/sai license (kèm nút CHỌN FILE license). Trả True nếu user
+    vừa IMPORT license -> caller nên KIỂM TRA LẠI; False nếu user chọn Thoát.
+    """
+    try:
+        mid = machine_id_pretty()
+    except Exception:
+        mid = "(không đọc được thông tin phần cứng)"
+    mid_file = _write_machine_id_file(mid)
+    shown, imported = _qt_machine_id_dialog("Mã máy", reason, tool_name, mid, mid_file)
+    if not shown:
+        _show_message("Mã máy", f"{reason}\n\nMÃ MÁY:\n{mid}\n\n(Đã lưu machine_id.txt)")
+    return imported
 
 
 # --------------------------------------------------------------------- #
@@ -537,24 +620,32 @@ def check_license(tool_name: str, *, raise_on_error: bool = False) -> LicenseInf
                   (đặt raise_on_error=True để ném LicenseError thay vì thoát —
                    hữu ích khi tự viết UI xử lý riêng).
     """
-    try:
-        lic_path = _find_license_file()
-        if lic_path is None:
-            raise LicenseError(
-                f"Không tìm thấy file '{LICENSE_FILENAME}'. "
-                f"Máy này CHƯA được cấp phép."
-            )
-        text = lic_path.read_text(encoding="utf-8", errors="ignore")
-        info = verify_license_text(text, tool_name)
-        return info
-    except LicenseError as e:
-        if raise_on_error:
-            raise
-        _deny_and_exit(str(e), tool_name)
-    except Exception as e:  # phòng lỗi bất ngờ — vẫn từ chối an toàn.
-        if raise_on_error:
-            raise LicenseError(f"Lỗi kiểm license: {e}")
-        _deny_and_exit(f"Lỗi kiểm license: {e}", tool_name)
+    # Cho phép user bấm 'Chọn file license' rồi KIỂM LẠI (vài vòng, đề phòng chọn
+    # nhầm file / license sai máy). Import xong file nằm ở _user_license_dest() nên
+    # _find_license_file() vòng sau sẽ thấy.
+    for _ in range(5):
+        try:
+            lic_path = _find_license_file()
+            if lic_path is None:
+                raise LicenseError(
+                    f"Không tìm thấy file '{LICENSE_FILENAME}'. "
+                    f"Máy này CHƯA được cấp phép."
+                )
+            text = lic_path.read_text(encoding="utf-8", errors="ignore")
+            return verify_license_text(text, tool_name)
+        except LicenseError as e:
+            if raise_on_error:
+                raise
+            if _deny_or_import(str(e), tool_name):
+                continue                       # user vừa import license -> kiểm lại
+            sys.exit(1)
+        except Exception as e:  # phòng lỗi bất ngờ — vẫn từ chối an toàn.
+            if raise_on_error:
+                raise LicenseError(f"Lỗi kiểm license: {e}")
+            if _deny_or_import(f"Lỗi kiểm license: {e}", tool_name):
+                continue
+            sys.exit(1)
+    sys.exit(1)
 
 
 # --------------------------------------------------------------------- #

@@ -859,7 +859,9 @@ class MainWindow(QMainWindow):
 
 def main():
     check_license("TNT_VideoSubtitle")   # BẢO MẬT LICENSE — kiểm trước khi mở app.
-    app = QApplication(sys.argv)
+    # Hộp thoại license (khi thiếu key) có thể đã tạo QApplication -> tái dùng, tránh
+    # tạo trùng (PySide6 chỉ cho 1 QApplication mỗi tiến trình).
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     w = MainWindow()
     w.show()
