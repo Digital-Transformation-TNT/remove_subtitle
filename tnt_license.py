@@ -275,12 +275,98 @@ def _app_dir() -> Path:
     return Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
 
 
+def _mac_untranslocated_app_dir() -> "Path | None":
+    """
+    macOS: app TẢI VỀ (còn cờ quarantine) bị Gatekeeper 'App Translocation' -> chạy
+    ở thư mục TẠM ngẫu nhiên (/private/var/folders/.../AppTranslocation/...). Khi đó
+    `_app_dir()` trỏ vào thư mục tạm, KHÔNG thấy license.key người dùng để CẠNH app
+    thật -> báo 'chưa có key'. Hàm này gọi Security.framework
+    (SecTranslocateCreateOriginalPathForURL) để lấy lại ĐƯỜNG DẪN GỐC của .app ->
+    tìm license CẠNH app thật. Trả None nếu không phải mac / không bị translocation /
+    không lấy được (an toàn, có nhánh dự phòng khác).
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        exe = Path(sys.executable).resolve()
+    except Exception:
+        return None
+    if "/AppTranslocation/" not in str(exe):
+        return None                    # không bị translocation -> _app_dir() đã đúng
+    app = None
+    for p in exe.parents:
+        if p.suffix == ".app":
+            app = p
+            break
+    if app is None:
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+        cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+        sec = ctypes.CDLL(ctypes.util.find_library("Security"))
+        vp = ctypes.c_void_p
+        # KHAI BÁO restype/argtype = con trỏ (c_void_p) -> tránh cắt cụt trên 64-bit.
+        cf.CFStringCreateWithCString.restype = vp
+        cf.CFStringCreateWithCString.argtypes = [vp, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFURLCreateWithFileSystemPath.restype = vp
+        cf.CFURLCreateWithFileSystemPath.argtypes = [vp, vp, ctypes.c_long, ctypes.c_bool]
+        cf.CFURLGetFileSystemRepresentation.restype = ctypes.c_bool
+        cf.CFURLGetFileSystemRepresentation.argtypes = [vp, ctypes.c_bool, ctypes.c_char_p, ctypes.c_long]
+        cf.CFRelease.argtypes = [vp]
+        sec.SecTranslocateCreateOriginalPathForURL.restype = vp
+        sec.SecTranslocateCreateOriginalPathForURL.argtypes = [vp, vp]
+
+        k_utf8 = 0x08000100            # kCFStringEncodingUTF8
+        cfstr = cf.CFStringCreateWithCString(None, str(app).encode("utf-8"), k_utf8)
+        if not cfstr:
+            return None
+        url = cf.CFURLCreateWithFileSystemPath(None, cfstr, 0, True)  # 0=POSIX, isDir=True
+        cf.CFRelease(cfstr)
+        if not url:
+            return None
+        orig = sec.SecTranslocateCreateOriginalPathForURL(url, None)
+        cf.CFRelease(url)
+        if not orig:
+            return None
+        buf = ctypes.create_string_buffer(4096)
+        ok = cf.CFURLGetFileSystemRepresentation(orig, True, buf, 4096)
+        cf.CFRelease(orig)
+        if not ok:
+            return None
+        real_app = Path(os.fsdecode(buf.value))
+        return real_app.parent         # thư mục CHỨA .app THẬT (chỗ user để license)
+    except Exception:
+        return None
+
+
 def _candidate_paths() -> list[Path]:
+    """
+    Nơi tìm license.key, THEO THỨ TỰ.
+    - Cạnh app (như thường lệ).
+    - Cạnh app THẬT sau khi hoá giải 'App Translocation' của macOS (fix chính vụ
+      'để cạnh app mà vẫn báo chưa có key' trên bản Mac tải về).
+    - BÊN TRONG bundle (.app/Contents/Resources) -> chỗ đi theo app, miễn nhiễm
+      translocation (dự phòng).
+    - Đường dẫn chung cố định của hệ.
+    """
     paths: list[Path] = []
     env = os.environ.get("TNT_LICENSE_PATH")
     if env:
         paths.append(Path(env))
-    paths.append(_app_dir() / LICENSE_FILENAME)
+    paths.append(_app_dir() / LICENSE_FILENAME)               # cạnh app (chỗ trực quan)
+    real = _mac_untranslocated_app_dir()
+    if real is not None:
+        paths.append(real / LICENSE_FILENAME)                 # cạnh app THẬT (hoá giải translocation)
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        try:
+            exe = Path(sys.executable).resolve()
+            for p in exe.parents:
+                if p.suffix == ".app":
+                    paths.append(p / "Contents" / "Resources" / LICENSE_FILENAME)
+                    break
+        except Exception:
+            pass
     if sys.platform.startswith("win"):
         paths.append(Path(COMMON_LICENSE_PATH))
     else:
