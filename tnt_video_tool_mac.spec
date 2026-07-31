@@ -76,7 +76,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports + ["video_utils", "vmake_client", "numpy",
-                                   "tnt_license", "cryptography"],
+                                   "tnt_license", "cryptography", "notifier"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

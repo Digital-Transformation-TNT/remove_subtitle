@@ -57,6 +57,20 @@ App KHÔNG bị lỗi. macOS chặn mọi app chưa mua chứng nhận Apple ($9
   4. Mở lại app -> dùng bình thường.
 
 ------------------------------------------------------------------------
+ THÔNG BÁO KHI XONG (thu nhỏ app vẫn thấy)
+------------------------------------------------------------------------
+  * Xong mỗi video, xong toàn bộ, hoặc gặp lỗi -> app đẩy thông báo ra
+    NOTIFICATION CENTER (góc phải trên) + nảy icon dưới Dock. Cứ thu nhỏ
+    app đi làm việc khác.
+  * Bấm nút "Thử thông báo" (Tab 2 - Cấu hình & Chạy) để test ngay.
+  * KHÔNG thấy thông báo? macOS đang chặn:
+      - Cài đặt hệ thống -> Thông báo -> tìm "Script Editor" (macOS hiện
+        thông báo của app qua tiến trình này) -> BẬT "Cho phép thông báo".
+      - Tắt chế độ "Focus / Không làm phiền".
+      - Vẫn không được -> tick "Kèm popup mỗi khi xong 1 video" trong app:
+        mỗi video xong sẽ bung 1 cửa sổ nổi lên trên, chắc chắn thấy.
+
+------------------------------------------------------------------------
  LƯU Ý
 ------------------------------------------------------------------------
   * license.key gắn với ĐÚNG MÁY này. Copy sang máy Mac khác sẽ KHÔNG chạy.

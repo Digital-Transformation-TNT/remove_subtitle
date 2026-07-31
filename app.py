@@ -24,10 +24,11 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QRadioButton, QButtonGroup,
     QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox, QGroupBox, QPlainTextEdit,
-    QProgressBar, QMessageBox, QFrame, QTabWidget, QSystemTrayIcon,
+    QProgressBar, QMessageBox, QFrame, QTabWidget,
 )
 
 from tnt_license import check_license
+from notifier import Notifier
 import video_utils as vu
 import vmake_client
 
@@ -179,11 +180,14 @@ class PipelineWorker(QThread):
     sig_done = Signal(str)
     sig_error = Signal(str)
     sig_file_done = Signal(str, str)   # (tên video, đường dẫn file kết quả) -> báo popup
+    sig_notify = Signal(str, str, str)  # (tiêu đề, nội dung, chi tiết) -> thông báo hệ thống
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self._stop = False
+        self.result_dir = ""    # thư mục kết quả cuối (đưa vào thông báo lúc xong)
+        self.done_count = 0     # số video đã ghép xong (đưa vào thông báo lúc xong)
 
     def stop(self):
         self._stop = True
@@ -239,6 +243,11 @@ class PipelineWorker(QThread):
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, ensure_ascii=False, indent=2)
             self.log(f"Đã lưu manifest: {manifest_path}")
+            if not (c["do_vmake"] or c["do_merge"]):
+                # Chỉ chạy bước Tách -> báo ngay ở đây (không có bước Ghép để báo).
+                self.sig_notify.emit("✅ Xong bước Tách video",
+                                     f"Đã tách {len(videos)} video thành các đoạn.",
+                                     seg_root)
         else:
             if not os.path.exists(manifest_path):
                 raise RuntimeError(
@@ -287,6 +296,11 @@ class PipelineWorker(QThread):
             )
             self.sig_progress.emit(processed, total)
             self.log(f"Đã xử lý {processed}/{total} đoạn qua vmake.")
+            if not c["do_merge"]:
+                # Không ghép -> bước vmake là bước cuối, báo luôn kẻo không có gì báo.
+                self.sig_notify.emit("✅ Xong bước Xoá phụ đề",
+                                     f"Đã xử lý {processed}/{total} đoạn qua vmake.",
+                                     proc_root)
 
         if self._stop:
             return
@@ -319,8 +333,10 @@ class PipelineWorker(QThread):
                                   audio_files=audio_files)
                 self.log(f"  -> {out_path}")
                 self.sig_progress.emit(vi, len(vids))
-                # Báo popup: XONG 1 file (video hoàn chỉnh vừa ghép xong).
+                # Báo ra ngoài tool: XONG 1 file (video hoàn chỉnh vừa ghép xong).
+                self.done_count += 1
                 self.sig_file_done.emit(v["name"], out_path)
+            self.result_dir = final_root
             self.log(f"Video hoàn chỉnh nằm trong: {final_root}")
 
 
@@ -406,15 +422,15 @@ class MainWindow(QMainWindow):
         self.login_worker = None
         self.proxy_fetcher = None
         self._popups = []          # giữ tham chiếu popup không-chặn (khỏi bị dọn rác)
-        # Icon khay hệ thống để hiện thông báo "xong 1 file" (kể cả khi thu nhỏ).
-        self._tray = None
-        try:
-            if QSystemTrayIcon.isSystemTrayAvailable():
-                self._tray = QSystemTrayIcon(self.windowIcon(), self)
-                self._tray.setToolTip("TNT — Tách & Xoá phụ đề video")
-                self._tray.show()
-        except Exception:
-            self._tray = None
+        # Thông báo hệ thống: hiện NGOÀI tool (toast góc màn hình / Notification Center)
+        # nên người dùng thu nhỏ tool đi làm việc khác vẫn thấy báo xong.
+        # Windows/Linux dùng icon khay; macOS dùng Notification Center — xem notifier.py.
+        self._notifier = Notifier(
+            app_name="TNT — Tách & Xoá phụ đề video",
+            icon=self.windowIcon(),
+            parent=self,
+            on_activated=self.restore_window,   # bấm icon khay -> mở lại cửa sổ
+        )
         self._build_ui()
         self._apply_cfg(load_config())
         self._update_session_label()
@@ -578,6 +594,29 @@ class MainWindow(QMainWindow):
             "tối đa 15 để không mở quá nhiều task song song gây nặng máy/vmake."
         )
         og.addWidget(self.sp_batch, 6, 1)
+
+        # --- Thông báo khi xong (hiện NGOÀI tool, kể cả lúc thu nhỏ) ---
+        og.addWidget(QLabel("Thông báo khi xong:"), 7, 0)
+        noti_w = QWidget()
+        nh = QHBoxLayout(noti_w)
+        nh.setContentsMargins(0, 0, 0, 0)
+        self.cb_popup = QCheckBox("Kèm popup mỗi khi xong 1 video")
+        self.cb_popup.setToolTip(
+            "Mặc định tool báo bằng THÔNG BÁO HỆ THỐNG (góc màn hình / Notification "
+            "Center) nên thu nhỏ tool vẫn thấy. Bật thêm mục này nếu muốn CHẮC CHẮN "
+            "thấy: mỗi video xong sẽ bung thêm 1 cửa sổ popup nổi trên cùng."
+        )
+        btn_test_noti = QPushButton("Thử thông báo")
+        btn_test_noti.setToolTip(
+            "Bấm thử để xem máy có hiện thông báo không. Không thấy gì -> vào cài đặt "
+            "Thông báo của hệ điều hành bật cho ứng dụng này (Windows: Settings → "
+            "Notifications; macOS: Cài đặt → Thông báo)."
+        )
+        btn_test_noti.clicked.connect(self.test_notification)
+        nh.addWidget(self.cb_popup)
+        nh.addWidget(btn_test_noti)
+        nh.addStretch(1)
+        og.addWidget(noti_w, 7, 1, 1, 2)
         t2.addWidget(opt_box)
 
         # --- Phiên đăng nhập vmake (BẬT LẠI để test hạn mức theo tài khoản) ---
@@ -655,6 +694,7 @@ class MainWindow(QMainWindow):
             "delay_min": self.sp_delay_min.value(),
             "delay_max": self.sp_delay_max.value(),
             "batch_size": int(self.sp_batch.value()),
+            "popup_each": self.cb_popup.isChecked(),
             # --- proxy/tor đã ẩn ---
             # "proxies": [...], "use_tor": ..., "tor_socks": ..., "tor_ctrl": ..., "tor_pass": ...,
         }
@@ -685,6 +725,7 @@ class MainWindow(QMainWindow):
         self.sp_delay_min.setValue(cfg.get("delay_min", 1.0))
         self.sp_delay_max.setValue(cfg.get("delay_max", 2.0))
         self.sp_batch.setValue(int(cfg.get("batch_size", 10)))
+        self.cb_popup.setChecked(bool(cfg.get("popup_each", False)))
         # --- proxy/tor đã ẩn — không nạp ed_proxies/cb_tor/tor_* nữa ---
 
     def on_save_config(self):
@@ -802,6 +843,7 @@ class MainWindow(QMainWindow):
         self.worker.sig_done.connect(self.on_done)
         self.worker.sig_error.connect(self.on_error)
         self.worker.sig_file_done.connect(self.on_file_done)
+        self.worker.sig_notify.connect(self.notify_outside)
         self.worker.start()
 
     def stop(self):
@@ -809,32 +851,43 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.append_log("Đang yêu cầu dừng (sẽ dừng sau bước hiện tại)…")
 
-    def on_done(self, msg):
-        self.append_log(msg)
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+    # ----- thông báo hiện NGOÀI tool (kể cả khi cửa sổ đang thu nhỏ) -----
+    def restore_window(self):
+        """Mở lại cửa sổ khi bấm vào icon khay / thông báo."""
+        try:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
 
-    def on_file_done(self, name, path):
-        """Hiện thông báo KHI XONG 1 video (không chặn xử lý các video còn lại)."""
-        title = "✅ Xong 1 video"
-        body = f"Đã xử lý xong: {name}"
+    def notify_outside(self, title, body, detail="", popup_fallback=True):
+        """Đẩy 1 thông báo ra ngoài tool. Không gửi được -> bung popup nổi trên cùng."""
         shown = False
-        # Ưu tiên thông báo khay hệ thống (toast) — hiện cả khi cửa sổ đang thu nhỏ.
-        if self._tray is not None:
-            try:
-                self._tray.showMessage(title, f"{body}\n{path}",
-                                       QSystemTrayIcon.Information, 8000)
-                shown = True
-            except Exception:
-                shown = False
-        # Không có khay -> popup KHÔNG chặn luồng (non-modal), nổi lên trên.
-        if not shown:
-            box = QMessageBox(self)
+        try:
+            shown = self._notifier.notify(title, body, detail)
+        except Exception:
+            shown = False
+        if not shown and popup_fallback:
+            self.show_popup(title, body, detail)
+        self.flash_taskbar()
+
+    def flash_taskbar(self):
+        """Nháy nút taskbar (Windows) / nảy icon dock (macOS) để gây chú ý."""
+        try:
+            QApplication.alert(self)          # cửa sổ chính (đang thu nhỏ vẫn nháy)
+            QApplication.alert(None)          # ứng dụng — mac nảy dock kể cả khi ẩn
+        except Exception:
+            pass
+
+    def show_popup(self, title, body, detail=""):
+        """Popup KHÔNG chặn xử lý. Không đặt cha để hiện được cả khi cửa sổ thu nhỏ."""
+        try:
+            box = QMessageBox(None)           # KHÔNG parent -> cửa sổ độc lập
             box.setWindowTitle(title)
             box.setText(body)
-            box.setInformativeText(path)
+            if detail:
+                box.setInformativeText(detail)
             box.setIcon(QMessageBox.Information)
             box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             box.setModal(False)
@@ -842,19 +895,85 @@ class MainWindow(QMainWindow):
                                  if b in self._popups else None)
             self._popups.append(box)
             box.show()
-        # Nháy taskbar để chú ý dù đang làm việc khác.
-        try:
-            QApplication.alert(self)
+            box.raise_()
         except Exception:
             pass
 
+    def on_done(self, msg):
+        self.append_log(msg)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        # Báo XONG TOÀN BỘ ra ngoài tool + popup tổng kết (dù có đang thu nhỏ).
+        stopped = msg.startswith("Đã dừng")
+        n = getattr(self.worker, "done_count", 0) if self.worker else 0
+        out_dir = getattr(self.worker, "result_dir", "") if self.worker else ""
+        if stopped:
+            title, body = "⏹ Đã dừng", "Đã dừng theo yêu cầu."
+        else:
+            title = "🎉 Xong tất cả!"
+            body = (f"Đã hoàn tất {n} video." if n else "Đã hoàn tất công việc.")
+        self.notify_outside(title, body, out_dir, popup_fallback=False)
+        self.show_popup(title, body, out_dir)
+
+    def on_file_done(self, name, path):
+        """Báo KHI XONG 1 video (không chặn xử lý các video còn lại)."""
+        title, body = "✅ Xong 1 video", f"Đã xử lý xong: {name}"
+        # popup_fallback: nếu người dùng đã tick "kèm popup" thì tự bung ở dưới,
+        # khỏi bung 2 lần khi thông báo hệ thống lỗi.
+        want_popup = self.cb_popup.isChecked()
+        self.notify_outside(title, body, path, popup_fallback=not want_popup)
+        if want_popup:
+            self.show_popup(title, body, path)
+
+    def test_notification(self):
+        """Nút 'Thử thông báo': kiểm tra máy có hiện thông báo ngoài tool không."""
+        self.append_log("Đang gửi thông báo thử… (thu nhỏ tool ra sẽ thấy ở góc màn hình)")
+        ok = False
+        try:
+            ok = self._notifier.notify(
+                "🔔 Thử thông báo",
+                "Thông báo hoạt động! Khi xong mỗi video bạn sẽ thấy báo như này.",
+                "TNT — Tách & Xoá phụ đề video")
+        except Exception as e:
+            self.append_log(f"Lỗi gửi thông báo: {e}")
+        self.flash_taskbar()
+        if ok:
+            self.append_log(
+                "Đã gửi thông báo. KHÔNG thấy gì? -> bật thông báo cho ứng dụng trong "
+                "cài đặt hệ điều hành (Windows: Settings → Notifications, tắt Focus "
+                "assist; macOS: Cài đặt → Thông báo), hoặc tick 'Kèm popup mỗi khi "
+                "xong 1 video'.")
+        else:
+            self.append_log(
+                "Máy không gửi được thông báo hệ thống -> tool sẽ dùng POPUP thay thế.")
+            self.show_popup("🔔 Thử thông báo",
+                            "Máy không hiện được thông báo hệ thống.",
+                            "Tool sẽ báo bằng popup như cửa sổ này.")
+
     def on_error(self, msg):
         self.append_log("LỖI: " + msg)
-        QMessageBox.critical(self, "Lỗi", msg)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        # Báo lỗi ra ngoài trước (thu nhỏ vẫn thấy), rồi mới mở hộp thoại chi tiết.
+        self.notify_outside("❌ Lỗi — đã dừng", msg.splitlines()[0][:180],
+                            popup_fallback=False)
+        QMessageBox.critical(self, "Lỗi", msg)
+
+    def closeEvent(self, event):
+        try:
+            self._notifier.shutdown()
+        except Exception:
+            pass
+        for b in list(self._popups):
+            try:
+                b.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 
 def main():
