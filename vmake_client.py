@@ -55,6 +55,28 @@ DOWNLOAD_PREVIEW_TEXTS = ["preview"]
 # Nút đồng ý cookie / popup hay gặp
 DISMISS_TEXTS = ["Accept", "Agree", "Got it", "OK", "Đồng ý", "Allow all", "Accept all"]
 
+# Nhãn nút TRẢ PHÍ cần TRÁNH bấm nhầm (mất tiền / tải sai bản). Nút free là
+# "Download ... preview"; các nhãn dưới đây là bản trả phí/nâng cấp -> BỎ QUA.
+PAID_DOWNLOAD_RX = re.compile(
+    r"\bfull\b|no[\s-]*watermark|1080|\bhd\b|\bpro\b|upgrade|unlock|\b4k\b|premium", re.I
+)
+# Dấu hiệu popup ĐĂNG NHẬP / TRẢ PHÍ chặn tải free khi chạy ẩn danh. Khi bấm
+# Download mà KHÔNG ra file rồi thấy các chữ này -> vmake yêu cầu đăng nhập.
+LOGIN_WALL_RX = re.compile(
+    r"sign\s*in|sign\s*up|log\s*in|create\s*(an\s*)?account|upgrade|go\s*pro|"
+    r"subscribe|đăng\s*nh[aậ]p|đăng\s*k[yý]",
+    re.I,
+)
+
+
+class LoginRequired(RuntimeError):
+    """vmake CHẶN tải free ẩn danh (hiện popup đăng nhập/trả phí) — cần đăng nhập.
+
+    Ném ra khi bấm Download nhưng không tải được và trên trang xuất hiện popup
+    đăng nhập/nâng cấp. Dừng cả mẻ với thông báo rõ để người dùng ĐĂNG NHẬP thay
+    vì lặp vô hạn 'xử lý xong nhưng không tải về'.
+    """
+
 # User-Agent thật (tránh "HeadlessChrome" khiến vmake dễ chặn khi chạy ẩn).
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -836,19 +858,36 @@ def _wait_task_card(page, name, timeout=45):
 
 
 def _card_preview_button(card):
-    """Nút 'Download ... preview' (free) bên TRONG card; None nếu chưa xong."""
+    """
+    Nút tải FREE ('Download ... preview') bên TRONG card; None nếu chưa xong.
+
+    TRƯỚC ĐÂY chỉ dò chữ 'preview' -> nếu vmake rút gọn nhãn còn 'Download' thì
+    KHÔNG nhận ra card đã xong -> card bị coi là 'quá lâu', xoá & up lại vòng vòng
+    (đúng lỗi 'xử lý xong không tải về'). NAY dò chữ 'download' (bao trùm cả nhãn
+    cũ 'Download 5s preview video'), CHỈ BỎ nút trả phí (full/HD/pro…). Ưu tiên nút
+    có 'preview'; nếu không có thì lấy nút 'download' free đầu tiên.
+    """
     try:
-        loc = card.get_by_text(re.compile(r"preview", re.I))
-        for i in range(loc.count()):
-            el = loc.nth(i)
-            try:
-                if el.is_visible() and "full" not in (el.inner_text() or "").lower():
-                    return el
-            except Exception:
-                continue
+        loc = card.get_by_text(re.compile(r"download", re.I))
+        n = loc.count()
     except Exception:
-        pass
-    return None
+        return None
+    fallback = None
+    for i in range(n):
+        try:
+            el = loc.nth(i)
+            if not el.is_visible():
+                continue
+            txt = el.inner_text() or ""
+        except Exception:
+            continue
+        if PAID_DOWNLOAD_RX.search(txt):     # bỏ nút trả phí (Download full / HD…)
+            continue
+        if re.search(r"preview", txt, re.I):  # đúng nút preview free
+            return el
+        if fallback is None:                  # dự phòng: nút 'download' free đầu tiên
+            fallback = el
+    return fallback
 
 
 _CONFIRM_TEXTS = ["Delete", "Confirm", "Yes", "OK", "Remove",
@@ -871,25 +910,35 @@ def _delete_card(page, card, log, name=None):
         page.wait_for_timeout(250)
     except Exception:
         pass
-    try:
-        cb = card.locator('div[class*="close-btn"]').first
-        if cb.count() == 0:
-            cb = card.locator('[class*="vmake-delete-icon"]').first
-        if cb.count() == 0:
-            return False
-    except Exception:
+    # Nút xoá có thể đổi class theo bản vmake -> thử NHIỀU selector (đừng bám 1 tên).
+    cb = None
+    for sel in (
+        'div[class*="close-btn"]', '[class*="vmake-delete-icon"]',
+        '[class*="delete"]', '[class*="remove"]', '[class*="trash"]',
+        'div[class*="close"]', 'span[class*="close"]',
+        '[aria-label*="delete" i]', '[aria-label*="remove" i]',
+        '[aria-label*="close" i]', 'button[class*="close"]',
+    ):
+        try:
+            loc = card.locator(sel).first
+            if loc.count() > 0:
+                cb = loc
+                break
+        except Exception:
+            continue
+    if cb is None:
         return False
 
     for how in ("click", "force", "js"):
         try:
             try:
-                cb.hover(timeout=1000)
+                cb.hover(timeout=800)
             except Exception:
                 pass
             if how == "click":
-                cb.click(timeout=3000)
+                cb.click(timeout=1500)
             elif how == "force":
-                cb.click(force=True, timeout=3000)
+                cb.click(force=True, timeout=1500)
             else:
                 cb.dispatch_event("click")
         except Exception:
@@ -918,7 +967,7 @@ def _clear_all_task_cards(page, log, max_clear=80):
         page.wait_for_timeout(300)
         if len(_leaf_cards(page)) >= before:   # không giảm -> kẹt
             stuck += 1
-            if stuck >= 3:
+            if stuck >= 2:                      # bỏ cuộc SỚM (khỏi treo cả phút)
                 break
         else:
             stuck = 0
@@ -928,7 +977,8 @@ def _clear_all_task_cards(page, log, max_clear=80):
         log(f"  Đã xoá sạch {cleared} task cũ.")
     log(f"  Số task còn lại trước khi up: {left}")
     if left > 0:
-        log("  (CẢNH BÁO: chưa xoá hết task cũ — có thể nút xoá đổi giao diện)")
+        log("  (Chưa xoá hết task cũ — CỨ CHẠY TIẾP: tải về đối chiếu theo TÊN file "
+            "nên task cũ tên khác sẽ không bị tải nhầm.)")
     return left
 
 
@@ -1067,14 +1117,77 @@ def _batch_upload(page, src, log):
     raise RuntimeError(f"vmake nuốt file, không tạo card sau {UPLOAD_TRIES} lần nạp")
 
 
-def _download_card(page, card, dst, log, timeout_ms=120000):
-    """Tải bản preview của ĐÚNG card này về dst. Trả về tên file gốc vmake gợi ý."""
+def _login_wall_text(page):
+    """
+    Sau khi bấm Download mà KHÔNG ra file: dò xem có popup ĐĂNG NHẬP / TRẢ PHÍ đang
+    chặn không. Trả về đoạn text của popup (để báo cho người dùng) hoặc None.
+    """
+    sels = (
+        'div[role="dialog"]', '[class*="modal"]', '[class*="dialog"]',
+        '[class*="login"]', '[class*="signin"]', '[class*="sign-in"]',
+        '[class*="paywall"]', '[class*="upgrade"]',
+    )
+    for sel in sels:
+        try:
+            loc = page.locator(sel)
+            for i in range(min(loc.count(), 6)):
+                el = loc.nth(i)
+                try:
+                    if el.is_visible():
+                        t = (el.inner_text() or "").strip()
+                        if t and LOGIN_WALL_RX.search(t):
+                            return t[:140].replace("\n", " ")
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return None
+
+
+def _dismiss_login_wall(page, log):
+    """Đóng popup đăng nhập/nâng cấp (Esc + bấm nút đóng) để không chắn các card sau."""
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+    for sel in ('[class*="close"]', '[aria-label*="close" i]', 'button:has-text("×")'):
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                loc.first.click(timeout=1500)
+                page.wait_for_timeout(200)
+                break
+        except Exception:
+            continue
+
+
+def _download_card(page, card, dst, log, timeout_ms=45000):
+    """
+    Tải bản preview của ĐÚNG card này về dst. Trả về tên file gốc vmake gợi ý.
+
+    Nếu bấm Download mà không ra file (hết giờ chờ): kiểm tra có popup ĐĂNG NHẬP /
+    TRẢ PHÍ chặn tải free ẩn danh không. Có -> ném LoginRequired (dừng mẻ, báo rõ
+    'cần đăng nhập') thay vì lặp vô hạn tốn hàng chục giây mỗi vòng.
+    """
     btn = _card_preview_button(card)
     if btn is None:
         raise RuntimeError("card chưa có nút Download preview")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with page.expect_download(timeout=timeout_ms) as dl:
-        btn.click(timeout=8000)
+    try:
+        with page.expect_download(timeout=timeout_ms) as dl:
+            btn.click(timeout=8000)
+    except Exception:
+        wall = _login_wall_text(page)
+        if wall:
+            _dismiss_login_wall(page, log)
+            raise LoginRequired(
+                "vmake CHẶN tải bản preview free khi chạy ẩn danh — hiện popup: "
+                f"“{wall}”.\nHãy ĐĂNG NHẬP vmake (mục 'Phiên đăng nhập vmake' trong "
+                "tool) rồi chạy lại; các đoạn đã tải xong sẽ được giữ, chỉ chạy tiếp "
+                "đoạn còn thiếu."
+            )
+        raise
     download = dl.value
     download.save_as(dst)
     try:
@@ -1083,11 +1196,21 @@ def _download_card(page, card, dst, log, timeout_ms=120000):
         return ""
 
 
+def _seg_index_token(name):
+    """Chỉ số đuôi của tên đoạn ('MyVid_003.mp4' -> '003'); None nếu không có."""
+    m = re.search(r"_(\d{2,})\.[A-Za-z0-9]+$", name)
+    return m.group(1) if m else None
+
+
 def _card_match_name(card, names, log=None):
     """
     Đọc TEXT trong 1 card, trả về tên đoạn (đang chờ) khớp DUY NHẤT trong card đó.
-    Nếu khớp >1 (selector card quá rộng / nhầm wrapper) -> trả None + cảnh báo để
-    KHÔNG tải nhầm.
+
+    1) Khớp CHÍNH XÁC tên file (chắc nhất). Khớp >1 -> None + cảnh báo (tránh tải nhầm).
+    2) Khớp NỚI: vmake có thể RÚT GỌN tên dài (vd 'Ten_video_dai...003.mp4') khiến
+       khớp chính xác trượt -> card xong nhưng không nhận ra -> kẹt vòng lặp. Khi đó
+       đối chiếu 'vài ký tự đầu tên' + 'chỉ số đuôi đoạn' (đủ phân biệt các đoạn cùng
+       video), CHỈ nhận khi khớp NỚI ra DUY NHẤT 1 tên.
     """
     try:
         txt = card.inner_text() or ""
@@ -1096,8 +1219,25 @@ def _card_match_name(card, names, log=None):
     hits = [nm for nm in names if nm in txt]
     if len(hits) == 1:
         return hits[0]
-    if len(hits) > 1 and log:
-        log(f"  (CẢNH BÁO: 1 card chứa nhiều tên {hits} — bỏ qua, tránh tải nhầm)")
+    if len(hits) > 1:
+        if log:
+            log(f"  (CẢNH BÁO: 1 card chứa nhiều tên {hits} — bỏ qua, tránh tải nhầm)")
+        return None
+
+    # --- khớp NỚI cho tên bị rút gọn ---
+    low = txt.lower()
+    loose = []
+    for nm in names:
+        idx = _seg_index_token(nm)
+        if not idx:
+            continue
+        head = os.path.splitext(nm)[0].lower()[:5]   # vài ký tự đầu (trước phần bị cắt)
+        if head and head in low and idx in low:
+            loose.append(nm)
+    if len(loose) == 1:
+        if log:
+            log(f"  (khớp NỚI theo tên rút gọn -> '{loose[0]}')")
+        return loose[0]
     return None
 
 
@@ -1108,33 +1248,64 @@ def _handle_one_done_card(page, in_flight, log):
     Trả về tên đã xử lý, hoặc None nếu chưa có card nào xong.
     """
     names = list(in_flight.keys())
+    # Gom các card ĐÃ XONG (có nút Download).
+    done_cards = []
     for card in _leaf_cards(page):
         try:
-            if _card_preview_button(card) is None:
-                continue   # card này chưa xong (đang Processing…)
+            if _card_preview_button(card) is not None:
+                done_cards.append(card)
         except Exception:
             continue
-        matched = _card_match_name(card, names, log)
-        if matched is None:
-            continue
-        info = in_flight[matched]
-        try:
-            sug = _download_card(page, card, info["dst"], log)
-        except Exception as e:
-            log(f"  Lỗi tải card '{matched}': {e}")
-            return None
-        if os.path.exists(info["dst"]) and _valid_video(info["dst"]):
-            _delete_card(page, card, log, name=matched)   # xoá + kiểm chứng đã mất
-            del in_flight[matched]
-            log(f"  [✓] '{matched}' -> {os.path.basename(info['dst'])} (vmake gửi: {sug})")
-            return matched
-        # tải hỏng -> xoá file để poll sau thử lại
-        try:
-            if os.path.exists(info["dst"]):
-                os.remove(info["dst"])
-        except OSError:
-            pass
+    if not done_cards:
         return None
+
+    # Ghép card-xong với tên đoạn: ưu tiên khớp theo TÊN (chính xác/nới).
+    target = None          # (card, name) sẽ tải ở lượt này
+    unmatched = []
+    for card in done_cards:
+        nm = _card_match_name(card, names, log)
+        if nm is not None:
+            target = (card, nm)
+            break
+        unmatched.append(card)
+
+    # SUY LUẬN (match-by-elimination): không khớp được tên NHƯNG chỉ còn ĐÚNG 1 đoạn
+    # in-flight và ĐÚNG 1 card xong -> chắc chắn là nó. Cứu đúng ca 'đoạn cuối kẹt vì
+    # tên hiển thị lạ' thay vì để nó timeout & up lại vòng vòng. Chỉ làm khi 1-1 để
+    # KHÔNG bao giờ tải nhầm khi nhiều đoạn chạy song song.
+    if target is None and len(names) == 1 and len(unmatched) == 1:
+        target = (unmatched[0], names[0])
+        log(f"  (suy luận: card xong duy nhất -> đoạn còn lại '{names[0]}')")
+
+    if target is None:
+        return None
+
+    card, matched = target
+    info = in_flight[matched]
+    # Card này vừa tải hụt (bấm Download không ra file, không có popup) -> NGHỈ ngắn
+    # trước khi thử lại, khỏi bấm 'dead-download' liên tục (mỗi lần chờ vài chục giây).
+    if info.get("dl_cooldown", 0) > time.time():
+        return None
+    try:
+        sug = _download_card(page, card, info["dst"], log)
+    except LoginRequired:
+        raise   # dừng cả mẻ, báo rõ 'cần đăng nhập' (không lặp vô hạn)
+    except Exception as e:
+        info["dl_cooldown"] = time.time() + 20   # nghỉ 20s rồi mới thử tải lại card này
+        log(f"  Lỗi tải card '{matched}': {e}")
+        return None
+    # --- tải THÀNH CÔNG: nghiệm thu file rồi xoá card + gỡ khỏi in_flight ---
+    if os.path.exists(info["dst"]) and _valid_video(info["dst"]):
+        _delete_card(page, card, log, name=matched)   # xoá + kiểm chứng đã mất
+        del in_flight[matched]
+        log(f"  [✓] '{matched}' -> {os.path.basename(info['dst'])} (vmake gửi: {sug})")
+        return matched
+    # tải hỏng -> xoá file để poll sau thử lại
+    try:
+        if os.path.exists(info["dst"]):
+            os.remove(info["dst"])
+    except OSError:
+        pass
     return None
 
 
@@ -1314,10 +1485,12 @@ def process_videos(jobs, mode="auto", headless=False, per_video_timeout=300,
             page.wait_for_timeout(1500)
             # Phiên đăng nhập khôi phục task cũ khá TRỄ (có cái hiện sau cả chục
             # giây) -> dọn 1 lần là chưa chắc sạch: card cũ lò dò hiện sau đó sẽ
-            # bị đếm nhầm thành "card mới" lúc xác nhận upload. Dọn tới khi ĐỨNG YÊN.
-            for _ in range(4):
+            # bị đếm nhầm thành "card mới" lúc xác nhận upload. Dọn tới khi ĐỨNG YÊN,
+            # NHƯNG nếu nút xoá của vmake đổi (xoá không được) thì KHÔNG cố mãi (treo
+            # cả phút) — dọn tối đa 2 lượt rồi CHẠY TIẾP (tải về đối chiếu theo TÊN).
+            for _ in range(2):
                 _clear_all_task_cards(page, log)
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(1500)
                 if not _leaf_cards(page):
                     break
 
