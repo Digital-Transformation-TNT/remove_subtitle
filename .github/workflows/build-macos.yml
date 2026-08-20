@@ -7,9 +7,30 @@ on:
     tags: ["v*"]
 
 jobs:
+  # Chạy TRƯỚC build vì rẻ (~1 phút): bắt ngay class regression 'ffmpeg options
+  # bị bỏ giữa các phiên bản' (như `-filter_complex_script` bị bỏ ở ffmpeg 8/9)
+  # bằng cách gọi thẳng hàm merge_segments trên ffmpeg hệ điều hành. Nếu lỗi ở
+  # đây, không tốn 15-20 phút runner Mac để phát hiện sau.
+  smoke-merge-linux:
+    name: Smoke — merge_segments (Linux, ffmpeg hệ)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cài ffmpeg mới nhất (apt build gần với runtime user)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -3
+      - name: Chạy merge smoke test
+        run: python tests/test_merge_smoke.py
+
   build:
     name: Build ${{ matrix.arch }} (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    needs: smoke-merge-linux
     strategy:
       fail-fast: false            # 1 kiến trúc lỗi/chờ lâu KHÔNG huỷ cái kia
       matrix:
@@ -27,6 +48,19 @@ jobs:
 
       - name: Build .app (ffmpeg + Chromium nhúng sẵn, đúng kiến trúc runner)
         run: bash build_mac.sh
+
+      - name: Smoke test — merge_segments trên ffmpeg VENDORED (Martin Riedl)
+        # Đây là bin THẬT user sẽ nhận. Nếu Martin Riedl bump ffmpeg lên phiên
+        # bản mới bỏ tiếp option nào ta đang dùng, step này CHẾT trước khi
+        # phát hành .app -> ta biết ngay, không đợi user báo lỗi.
+        run: |
+          source .venv/bin/activate
+          FF="$PWD/vendor/ffmpeg/ffmpeg"
+          FP="$PWD/vendor/ffmpeg/ffprobe"
+          test -x "$FF" && test -x "$FP" || { echo "Thiếu ffmpeg vendored"; exit 1; }
+          # Buộc find_binary() dùng bản vendored (nằm cạnh Python) qua PATH.
+          export PATH="$PWD/vendor/ffmpeg:$PATH"
+          python tests/test_merge_smoke.py
 
       - name: Smoke test — app THẬT khởi động được (bắt lỗi thiếu cryptography)
         run: |

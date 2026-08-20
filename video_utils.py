@@ -540,15 +540,16 @@ def merge_segments(seg_files, out_path, ffmpeg="ffmpeg", ffprobe="ffprobe",
     parts.append(f"{concat_in}concat=n={k}:v=1:a=1[outv][outa]")
     graph = ";".join(parts)
 
-    script = out_path + ".filter.txt"
-    with open(script, "w", encoding="utf-8") as f:
-        f.write(graph)
     inputs = []
     for p in seg_files:
         inputs += ["-i", p]
     for p in extra_inputs:          # nguồn tiếng gốc cho đoạn vmake rớt audio
         inputs += ["-i", p]
-    cmd = [ffmpeg, "-y", *inputs, "-filter_complex_script", script,
+    # ffmpeg 8/9 (Martin Riedl static build cho macOS) ĐÃ BỎ '-filter_complex_script';
+    # truyền graph inline qua '-filter_complex' để chạy được trên MỌI phiên bản ffmpeg.
+    # Graph điển hình (kể cả video dài 50 đoạn) ~15 KB — dưới ngưỡng dòng lệnh Windows
+    # (~32k) rất xa, không cần file tạm.
+    cmd = [ffmpeg, "-y", *inputs, "-filter_complex", graph,
            "-map", "[outv]", "-map", "[outa]"]
     nframes = None
     if total_dur:
@@ -559,13 +560,7 @@ def merge_segments(seg_files, out_path, ffmpeg="ffmpeg", ffprobe="ffprobe",
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-video_track_timescale", "90000", "-movflags", "+faststart", out_path,
     ]
-    try:
-        log(f"  Ghép {k} đoạn (fps gốc={fps}, giữ nguyên kích thước, "
-            f"{nframes or 0} frame ≈ {total_dur or 0:.2f}s)…")
-        run_cmd(cmd)
-    finally:
-        try:
-            os.remove(script)
-        except OSError:
-            pass
+    log(f"  Ghép {k} đoạn (fps gốc={fps}, giữ nguyên kích thước, "
+        f"{nframes or 0} frame ≈ {total_dur or 0:.2f}s)…")
+    run_cmd(cmd)
     return out_path
