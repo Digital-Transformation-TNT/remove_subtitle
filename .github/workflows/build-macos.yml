@@ -1,10 +1,15 @@
 name: Build macOS app
 
-# Chạy thủ công trong tab Actions (Run workflow), hoặc khi đẩy tag v*.
+# - Smoke Linux (~1p): chạy MỌI push/PR để bắt regression sớm, khỏi phải chờ
+#   người ta đẩy tag mới phát hiện lỗi (kiểu 'ffmpeg 8/9 bỏ filter_complex_script').
+# - Build Mac (15-20p, tốn runner): giữ nguyên trigger cũ — thủ công / tag v*.
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
 
 jobs:
   # Chạy TRƯỚC build vì rẻ (~1 phút): bắt ngay class regression 'ffmpeg options
@@ -31,6 +36,9 @@ jobs:
     name: Build ${{ matrix.arch }} (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: smoke-merge-linux
+    # Đừng đốt runner Mac cho mỗi commit main / mỗi PR — chỉ build khi đẩy tag
+    # v* (release) hoặc bấm Run workflow thủ công. Smoke Linux vẫn chạy mọi lúc.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false            # 1 kiến trúc lỗi/chờ lâu KHÔNG huỷ cái kia
       matrix:
