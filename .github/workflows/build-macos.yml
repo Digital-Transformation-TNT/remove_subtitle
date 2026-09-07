@@ -5,6 +5,11 @@ name: Build macOS app
 # - Build Mac (15-20p, tốn runner): giữ nguyên trigger cũ — thủ công / tag v*.
 on:
   workflow_dispatch:
+    inputs:
+      include_intel:
+        description: "Build thêm bản Intel x86_64 (runner macos-13 hay xếp hàng rất lâu)"
+        type: boolean
+        default: false
   push:
     branches: [main]
     tags: ["v*"]
@@ -41,12 +46,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false            # 1 kiến trúc lỗi/chờ lâu KHÔNG huỷ cái kia
+      # MẶC ĐỊNH CHỈ BUILD arm64. Runner macos-13 (Intel) hiện xếp hàng gần như
+      # vô hạn — job cứ treo ở "queued" hàng ngày trời, làm cả run không bao giờ
+      # kết thúc dù bản arm64 đã xong và artifact đã tải lên được.
+      # Cần bản Intel thì bấm Run workflow rồi tick "include_intel".
       matrix:
-        include:
-          - runner: macos-14      # Apple Silicon (M1/M2/M3…) -> app arm64, runner sẵn, cấp nhanh
-            arch: arm64
-          - runner: macos-13      # Intel x86_64 -> app chạy Mac Intel (runner có thể chờ lâu hơn)
-            arch: intel
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.include_intel) && '[{"runner":"macos-14","arch":"arm64"},{"runner":"macos-13","arch":"intel"}]' || '[{"runner":"macos-14","arch":"arm64"}]') }}
     steps:
       - uses: actions/checkout@v4
 
