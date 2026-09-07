@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QIcon
@@ -27,8 +28,13 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QFrame, QTabWidget,
 )
 
+import tnt_track
+from tnt_feedback import FeedbackBar
 from tnt_license import check_license
 from notifier import Notifier
+
+# Khoá tool trong nhật ký sử dụng (tab "Quản lý thời lượng" của webtool).
+FEATURE = "remove_subtitle"
 import video_utils as vu
 import vmake_client
 
@@ -434,6 +440,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_cfg(load_config())
         self._update_session_label()
+        # Bắt đầu theo dõi MỘT VIỆC = một mẻ xoá phụ đề.
+        self._job_t0 = 0.0
+        tnt_track.feature_open()
 
     def _build_ui(self):
         central = QWidget()
@@ -672,6 +681,10 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         t2.addWidget(self.progress)
 
+        # Thanh 👍/👎 — ẩn cho tới khi có video ghép xong (xem on_done).
+        self.fb = FeedbackBar(accent=ORANGE)
+        t2.addWidget(self.fb)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         t2.addWidget(self.log_view, 1)
@@ -745,6 +758,8 @@ class MainWindow(QMainWindow):
             path = QFileDialog.getExistingDirectory(self, "Chọn thư mục video")
         if path:
             self.ed_input.setText(path)
+            tnt_track.step("upload_done", "prepare",
+                           {"kind": "file" if self.rb_file.isChecked() else "folder"})
 
     def pick_output(self):
         path = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu")
@@ -778,6 +793,7 @@ class MainWindow(QMainWindow):
         self.append_log("Mở trình duyệt để đăng nhập vmake… Đăng nhập xong bấm 'Tôi đã đăng nhập xong'.")
         self.btn_login.setEnabled(False)
         self.btn_login_done.setEnabled(True)
+        tnt_track.step("api_key_set", "prepare", {"phase": "login"})
         self.login_worker = LoginWorker(SESSION_PATH)
         self.login_worker.sig_log.connect(self.append_log)
         self.login_worker.sig_done.connect(self.on_login_done)
@@ -837,6 +853,12 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
+        tnt_track.run_click({"phase": "remove_sub"})
+        # Mốc đo "máy chạy thật": worker chạy ngay, không xếp hàng nên khoảng
+        # này không lẫn thời gian chờ tới lượt.
+        self._job_t0 = time.time()
+        self.fb.reset()
+        tnt_track.job_started("remove_sub")
         self.worker = PipelineWorker(cfg)
         self.worker.sig_log.connect(self.append_log)
         self.worker.sig_progress.connect(self.set_progress)
@@ -909,6 +931,15 @@ class MainWindow(QMainWindow):
         stopped = msg.startswith("Đã dừng")
         n = getattr(self.worker, "done_count", 0) if self.worker else 0
         out_dir = getattr(self.worker, "result_dir", "") if self.worker else ""
+        if self._job_t0:
+            tnt_track.job_done("remove_sub", int((time.time() - self._job_t0) * 1000),
+                               ok=not stopped and bool(n), videos=n)
+            self._job_t0 = 0.0
+        # Có video ghép xong = việc này CÓ SẢN PHẨM (chỉ số B1 + tử số của A3).
+        if n:
+            tnt_track.output("mp4", {"count": n})
+            if not stopped:
+                self.fb.ask()      # tự bấm Dừng thì đừng hỏi — chưa xem hết kết quả
         if stopped:
             title, body = "⏹ Đã dừng", "Đã dừng theo yêu cầu."
         else:
@@ -958,12 +989,18 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        if self._job_t0:
+            tnt_track.job_done("remove_sub", int((time.time() - self._job_t0) * 1000),
+                               ok=False, error=msg.splitlines()[0][:80])
+            self._job_t0 = 0.0
         # Báo lỗi ra ngoài trước (thu nhỏ vẫn thấy), rồi mới mở hộp thoại chi tiết.
         self.notify_outside("❌ Lỗi — đã dừng", msg.splitlines()[0][:180],
                             popup_fallback=False)
         QMessageBox.critical(self, "Lỗi", msg)
 
     def closeEvent(self, event):
+        # Chốt việc dở + gửi nốt log trước khi tiến trình chết.
+        tnt_track.shutdown()
         try:
             self._notifier.shutdown()
         except Exception:
@@ -977,7 +1014,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    check_license("TNT_VideoSubtitle")   # BẢO MẬT LICENSE — kiểm trước khi mở app.
+    info = check_license("TNT_VideoSubtitle")   # BẢO MẬT LICENSE — kiểm trước khi mở app.
+    # Chỉ ĐỌC tên nhân viên đã ký sẵn trong license — không đụng gì cơ chế license.
+    tnt_track.init(FEATURE, license_info=info, tool="TNT_VideoSubtitle")
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     w = MainWindow()
