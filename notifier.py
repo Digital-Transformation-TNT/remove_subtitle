@@ -143,7 +143,9 @@ class Notifier:
             script += ' sound name "Glass"'
         try:
             r = subprocess.run([_OSASCRIPT, "-e", script], timeout=8,
-                               capture_output=True, text=True, env=_clean_env())
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
+                               env=_clean_env())
             ok = (r.returncode == 0)
             self._mac_ok = ok
             if not ok:

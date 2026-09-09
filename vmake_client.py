@@ -564,7 +564,9 @@ def _valid_video(path):
         out = subprocess.run(
             [ff, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=20,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return float((out.stdout or "0").strip() or 0) > 0.2
