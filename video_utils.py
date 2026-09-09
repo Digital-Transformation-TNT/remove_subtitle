@@ -51,9 +51,19 @@ def sanitize(name):
     return s or "video"
 
 
+# MỌI lời gọi ffmpeg/ffprobe bên dưới PHẢI có encoding="utf-8", errors="replace".
+# `text=True` không kèm encoding sẽ giải mã theo bảng mã hệ thống — trên Windows
+# là cp1252. ffmpeg in LẠI TÊN FILE vào output, mà video xử lý ở đây toàn tên
+# tiếng Việt: gặp dấu là ném UnicodeDecodeError, lỗi rơi vào `except` rồi hoá
+# thành "không đọc được video". Đã gây hỏng thật ở tool down_ads — người dùng
+# thấy tải chạy bình thường rồi tự nhiên báo lỗi (xem down_ads PR #5).
+
+
 def run_cmd(cmd):
     """Chạy 1 lệnh, ném lỗi kèm log nếu thất bại."""
-    out = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    out = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace",
+                         creationflags=_NO_WINDOW)
     if out.returncode != 0:
         msg = (out.stderr or out.stdout or "").strip()
         raise RuntimeError(msg[-2000:])
@@ -220,7 +230,9 @@ def _detect_fps(path, ffprobe="ffprobe"):
             [ffprobe, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=r_frame_rate",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=15, creationflags=_NO_WINDOW,
         )
         s = (out.stdout or "").strip()
         if "/" in s:
@@ -241,7 +253,9 @@ def _detect_size(path, ffprobe="ffprobe"):
         out = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
-            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=15, creationflags=_NO_WINDOW,
         )
         s = (out.stdout or "").strip()
         if "x" in s:
@@ -263,7 +277,9 @@ def _has_audio(path, ffprobe="ffprobe"):
         out = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=15, creationflags=_NO_WINDOW,
         )
         return bool((out.stdout or "").strip())
     except Exception:

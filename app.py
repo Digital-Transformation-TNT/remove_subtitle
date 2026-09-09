@@ -440,9 +440,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_cfg(load_config())
         self._update_session_label()
-        # Bắt đầu theo dõi MỘT VIỆC = một mẻ xoá phụ đề.
+        # KHÔNG mở "việc" ở đây. Mở app rồi đóng luôn mà cũng tính một việc thì
+        # việc đó vĩnh viễn không có sản phẩm -> bị đếm là BỎ DỞ, kéo tụt "Tỷ lệ
+        # hoàn thành" bằng thứ không phải công việc. Việc chỉ mở khi người dùng
+        # THẬT SỰ bấm chạy: tnt_track.run_click() tự mở nếu chưa có việc nào.
         self._job_t0 = 0.0
-        tnt_track.feature_open()
 
     def _build_ui(self):
         central = QWidget()
