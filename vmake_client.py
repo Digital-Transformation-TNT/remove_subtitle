@@ -1119,31 +1119,67 @@ def _batch_upload(page, src, log):
     raise RuntimeError(f"vmake nuốt file, không tạo card sau {UPLOAD_TRIES} lần nạp")
 
 
+# CHỈ dò trong LỚP PHỦ (popup/modal). TRƯỚC ĐÂY dò cả '[class*="upgrade"]',
+# '[class*="login"]'… -> khớp luôn nút "Upgrade"/"Log in" trên THANH MENU vmake (lúc
+# nào cũng hiện) -> báo nhầm "vmake CHẶN… popup: “Upgrade”" và DỪNG CẢ MẺ dù không
+# hề có popup nào.
+_WALL_SELECTORS = (
+    '[role="dialog"]', '[aria-modal="true"]', '[class*="modal" i]',
+    '[class*="dialog" i]', '[class*="popup" i]', '[class*="paywall" i]',
+)
+# Popup chặn thật luôn có câu giải thích; nhãn nút trơn ("Upgrade", "Log in") thì không.
+_WALL_MIN_TEXT = 20
+
+
 def _login_wall_text(page):
     """
     Sau khi bấm Download mà KHÔNG ra file: dò xem có popup ĐĂNG NHẬP / TRẢ PHÍ đang
     chặn không. Trả về đoạn text của popup (để báo cho người dùng) hoặc None.
     """
-    sels = (
-        'div[role="dialog"]', '[class*="modal"]', '[class*="dialog"]',
-        '[class*="login"]', '[class*="signin"]', '[class*="sign-in"]',
-        '[class*="paywall"]', '[class*="upgrade"]',
-    )
-    for sel in sels:
+    for sel in _WALL_SELECTORS:
         try:
             loc = page.locator(sel)
             for i in range(min(loc.count(), 6)):
                 el = loc.nth(i)
                 try:
-                    if el.is_visible():
-                        t = (el.inner_text() or "").strip()
-                        if t and LOGIN_WALL_RX.search(t):
-                            return t[:140].replace("\n", " ")
+                    if not el.is_visible():
+                        continue
+                    if el.evaluate("e => !!e.closest('header, nav')"):
+                        continue        # thanh menu, không phải popup
+                    t = " ".join((el.inner_text() or "").split())
+                    if len(t) >= _WALL_MIN_TEXT and LOGIN_WALL_RX.search(t):
+                        return t[:140]
                 except Exception:
                     continue
         except Exception:
             continue
     return None
+
+
+DEBUG_DIR = os.path.join(os.path.expanduser("~"), ".tnt_video_tool", "debug")
+_DEBUG_MAX = 5          # mỗi lần chạy chụp tối đa 5 lần, khỏi đầy ổ
+_debug_count = 0
+
+
+def _save_debug(page, name, log):
+    """
+    Tải hụt mà KHÔNG có popup chặn -> chụp màn hình + HTML trang vào DEBUG_DIR để
+    biết vmake đang hiện gì (đổi giao diện? nút mở menu?) mà sửa cho đúng.
+    """
+    global _debug_count
+    if _debug_count >= _DEBUG_MAX:
+        return
+    _debug_count += 1
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        stem = os.path.join(DEBUG_DIR, time.strftime("%Y%m%d_%H%M%S_")
+                            + os.path.splitext(name)[0][-40:])
+        page.screenshot(path=stem + ".png", full_page=True)
+        with open(stem + ".html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        log(f"  (Đã lưu ảnh chụp trang để soi lỗi: {stem}.png)")
+    except Exception:
+        pass
 
 
 def _dismiss_login_wall(page, log):
@@ -1184,11 +1220,12 @@ def _download_card(page, card, dst, log, timeout_ms=45000):
         if wall:
             _dismiss_login_wall(page, log)
             raise LoginRequired(
-                "vmake CHẶN tải bản preview free khi chạy ẩn danh — hiện popup: "
+                "vmake CHẶN tải bản preview free — hiện popup: "
                 f"“{wall}”.\nHãy ĐĂNG NHẬP vmake (mục 'Phiên đăng nhập vmake' trong "
                 "tool) rồi chạy lại; các đoạn đã tải xong sẽ được giữ, chỉ chạy tiếp "
                 "đoạn còn thiếu."
             )
+        _save_debug(page, os.path.basename(dst), log)
         raise
     download = dl.value
     download.save_as(dst)
