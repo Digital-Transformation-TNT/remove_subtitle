@@ -352,6 +352,72 @@ def _dismiss_overlays(page, log):
             pass
 
 
+# Popup QUẢNG CÁO của vmake (ant-design modal, vd banner "Halloween" chỉ có ảnh + nút
+# "Upgrade") tự bật lên giữa chừng và CHE cả trang -> mọi cú bấm Download/xoá card bị
+# chặn ("ant-modal-wrap … intercepts pointer events") -> 0 đoạn tải về được.
+_JS_VISIBLE_MODALS = """() => [...document.querySelectorAll('.ant-modal-wrap')]
+  .filter(w => w.offsetParent !== null || getComputedStyle(w).display !== 'none')
+  .filter(w => { const r = w.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+  .length"""
+_JS_HIDE_MODALS = """() => {
+  for (const w of document.querySelectorAll('.ant-modal-wrap')) {
+    const root = w.closest('.ant-modal-root') || w;
+    root.style.setProperty('display', 'none', 'important');
+  }
+  for (const m of document.querySelectorAll('.ant-modal-mask'))
+    m.style.setProperty('display', 'none', 'important');
+}"""
+
+
+def _close_blocking_modals(page, log):
+    """
+    Đóng mọi popup ant-modal đang che trang: bấm nút × -> Esc -> cùng lắm ẨN bằng JS.
+    Chỉ gọi GIỮA các thao tác (không gọi lúc đang xoá card) để khỏi đóng nhầm hộp
+    xác nhận. Trả về True nếu đã đóng được ít nhất 1 popup.
+    """
+    try:
+        if not page.evaluate(_JS_VISIBLE_MODALS):
+            return False
+    except Exception:
+        return False
+    try:
+        txt = " ".join((page.locator(".ant-modal-wrap").first.inner_text() or "").split())
+    except Exception:
+        txt = ""
+    for how in ("x", "esc", "js"):
+        try:
+            if how == "x":
+                btn = page.locator(".ant-modal-wrap .ant-modal-close").first
+                if btn.count() == 0:
+                    continue
+                btn.click(timeout=1500)
+            elif how == "esc":
+                page.keyboard.press("Escape")
+            else:
+                page.evaluate(_JS_HIDE_MODALS)
+            page.wait_for_timeout(300)
+            if not page.evaluate(_JS_VISIBLE_MODALS):
+                log(f"  Đã đóng popup che trang của vmake{f' (“{txt[:60]}”)' if txt else ''}.")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _click_through(page, el, log, timeout_ms=3000):
+    """Bấm el; bị popup che -> đóng popup rồi bấm lại, cùng lắm bấm bằng JS (xuyên lớp phủ)."""
+    try:
+        el.click(timeout=timeout_ms)
+        return
+    except Exception:
+        pass
+    _close_blocking_modals(page, log)
+    try:
+        el.click(timeout=timeout_ms)
+    except Exception:
+        el.dispatch_event("click")
+
+
 def _click_first_text(page, texts, log, timeout_ms=8000):
     """Thử bấm phần tử đầu tiên khớp 1 trong các chuỗi (button role hoặc text)."""
     for t in texts:
@@ -1119,31 +1185,67 @@ def _batch_upload(page, src, log):
     raise RuntimeError(f"vmake nuốt file, không tạo card sau {UPLOAD_TRIES} lần nạp")
 
 
+# CHỈ dò trong LỚP PHỦ (popup/modal). TRƯỚC ĐÂY dò cả '[class*="upgrade"]',
+# '[class*="login"]'… -> khớp luôn nút "Upgrade"/"Log in" trên THANH MENU vmake (lúc
+# nào cũng hiện) -> báo nhầm "vmake CHẶN… popup: “Upgrade”" và DỪNG CẢ MẺ dù không
+# hề có popup nào.
+_WALL_SELECTORS = (
+    '[role="dialog"]', '[aria-modal="true"]', '[class*="modal" i]',
+    '[class*="dialog" i]', '[class*="popup" i]', '[class*="paywall" i]',
+)
+# Popup chặn thật luôn có câu giải thích; nhãn nút trơn ("Upgrade", "Log in") thì không.
+_WALL_MIN_TEXT = 20
+
+
 def _login_wall_text(page):
     """
     Sau khi bấm Download mà KHÔNG ra file: dò xem có popup ĐĂNG NHẬP / TRẢ PHÍ đang
     chặn không. Trả về đoạn text của popup (để báo cho người dùng) hoặc None.
     """
-    sels = (
-        'div[role="dialog"]', '[class*="modal"]', '[class*="dialog"]',
-        '[class*="login"]', '[class*="signin"]', '[class*="sign-in"]',
-        '[class*="paywall"]', '[class*="upgrade"]',
-    )
-    for sel in sels:
+    for sel in _WALL_SELECTORS:
         try:
             loc = page.locator(sel)
             for i in range(min(loc.count(), 6)):
                 el = loc.nth(i)
                 try:
-                    if el.is_visible():
-                        t = (el.inner_text() or "").strip()
-                        if t and LOGIN_WALL_RX.search(t):
-                            return t[:140].replace("\n", " ")
+                    if not el.is_visible():
+                        continue
+                    if el.evaluate("e => !!e.closest('header, nav')"):
+                        continue        # thanh menu, không phải popup
+                    t = " ".join((el.inner_text() or "").split())
+                    if len(t) >= _WALL_MIN_TEXT and LOGIN_WALL_RX.search(t):
+                        return t[:140]
                 except Exception:
                     continue
         except Exception:
             continue
     return None
+
+
+DEBUG_DIR = os.path.join(os.path.expanduser("~"), ".tnt_video_tool", "debug")
+_DEBUG_MAX = 5          # mỗi lần chạy chụp tối đa 5 lần, khỏi đầy ổ
+_debug_count = 0
+
+
+def _save_debug(page, name, log):
+    """
+    Tải hụt mà KHÔNG có popup chặn -> chụp màn hình + HTML trang vào DEBUG_DIR để
+    biết vmake đang hiện gì (đổi giao diện? nút mở menu?) mà sửa cho đúng.
+    """
+    global _debug_count
+    if _debug_count >= _DEBUG_MAX:
+        return
+    _debug_count += 1
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        stem = os.path.join(DEBUG_DIR, time.strftime("%Y%m%d_%H%M%S_")
+                            + os.path.splitext(name)[0][-40:])
+        page.screenshot(path=stem + ".png", full_page=True)
+        with open(stem + ".html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        log(f"  (Đã lưu ảnh chụp trang để soi lỗi: {stem}.png)")
+    except Exception:
+        pass
 
 
 def _dismiss_login_wall(page, log):
@@ -1176,19 +1278,21 @@ def _download_card(page, card, dst, log, timeout_ms=45000):
     if btn is None:
         raise RuntimeError("card chưa có nút Download preview")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    _close_blocking_modals(page, log)
     try:
         with page.expect_download(timeout=timeout_ms) as dl:
-            btn.click(timeout=8000)
+            _click_through(page, btn, log)
     except Exception:
         wall = _login_wall_text(page)
         if wall:
             _dismiss_login_wall(page, log)
             raise LoginRequired(
-                "vmake CHẶN tải bản preview free khi chạy ẩn danh — hiện popup: "
+                "vmake CHẶN tải bản preview free — hiện popup: "
                 f"“{wall}”.\nHãy ĐĂNG NHẬP vmake (mục 'Phiên đăng nhập vmake' trong "
                 "tool) rồi chạy lại; các đoạn đã tải xong sẽ được giữ, chỉ chạy tiếp "
                 "đoạn còn thiếu."
             )
+        _save_debug(page, os.path.basename(dst), log)
         raise
     download = dl.value
     download.save_as(dst)
@@ -1328,6 +1432,7 @@ def _run_batch(page, pending, removal_type, batch_size,
     uploaded_any = False   # đã up ít nhất 1 đoạn -> mới cần giãn cách giữa các lần
 
     while (pending or in_flight) and not should_stop():
+        _close_blocking_modals(page, log)   # popup quảng cáo bật giữa chừng che cả trang
         # 1) Up bù cho đủ batch_size.
         while len(in_flight) < batch_size and pending and not should_stop():
             src, dst = pending.pop(0)
@@ -1491,6 +1596,7 @@ def process_videos(jobs, mode="auto", headless=False, per_video_timeout=300,
             # NHƯNG nếu nút xoá của vmake đổi (xoá không được) thì KHÔNG cố mãi (treo
             # cả phút) — dọn tối đa 2 lượt rồi CHẠY TIẾP (tải về đối chiếu theo TÊN).
             for _ in range(2):
+                _close_blocking_modals(page, log)
                 _clear_all_task_cards(page, log)
                 page.wait_for_timeout(1500)
                 if not _leaf_cards(page):
