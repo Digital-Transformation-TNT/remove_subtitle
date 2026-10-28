@@ -352,6 +352,72 @@ def _dismiss_overlays(page, log):
             pass
 
 
+# Popup QUẢNG CÁO của vmake (ant-design modal, vd banner "Halloween" chỉ có ảnh + nút
+# "Upgrade") tự bật lên giữa chừng và CHE cả trang -> mọi cú bấm Download/xoá card bị
+# chặn ("ant-modal-wrap … intercepts pointer events") -> 0 đoạn tải về được.
+_JS_VISIBLE_MODALS = """() => [...document.querySelectorAll('.ant-modal-wrap')]
+  .filter(w => w.offsetParent !== null || getComputedStyle(w).display !== 'none')
+  .filter(w => { const r = w.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+  .length"""
+_JS_HIDE_MODALS = """() => {
+  for (const w of document.querySelectorAll('.ant-modal-wrap')) {
+    const root = w.closest('.ant-modal-root') || w;
+    root.style.setProperty('display', 'none', 'important');
+  }
+  for (const m of document.querySelectorAll('.ant-modal-mask'))
+    m.style.setProperty('display', 'none', 'important');
+}"""
+
+
+def _close_blocking_modals(page, log):
+    """
+    Đóng mọi popup ant-modal đang che trang: bấm nút × -> Esc -> cùng lắm ẨN bằng JS.
+    Chỉ gọi GIỮA các thao tác (không gọi lúc đang xoá card) để khỏi đóng nhầm hộp
+    xác nhận. Trả về True nếu đã đóng được ít nhất 1 popup.
+    """
+    try:
+        if not page.evaluate(_JS_VISIBLE_MODALS):
+            return False
+    except Exception:
+        return False
+    try:
+        txt = " ".join((page.locator(".ant-modal-wrap").first.inner_text() or "").split())
+    except Exception:
+        txt = ""
+    for how in ("x", "esc", "js"):
+        try:
+            if how == "x":
+                btn = page.locator(".ant-modal-wrap .ant-modal-close").first
+                if btn.count() == 0:
+                    continue
+                btn.click(timeout=1500)
+            elif how == "esc":
+                page.keyboard.press("Escape")
+            else:
+                page.evaluate(_JS_HIDE_MODALS)
+            page.wait_for_timeout(300)
+            if not page.evaluate(_JS_VISIBLE_MODALS):
+                log(f"  Đã đóng popup che trang của vmake{f' (“{txt[:60]}”)' if txt else ''}.")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _click_through(page, el, log, timeout_ms=3000):
+    """Bấm el; bị popup che -> đóng popup rồi bấm lại, cùng lắm bấm bằng JS (xuyên lớp phủ)."""
+    try:
+        el.click(timeout=timeout_ms)
+        return
+    except Exception:
+        pass
+    _close_blocking_modals(page, log)
+    try:
+        el.click(timeout=timeout_ms)
+    except Exception:
+        el.dispatch_event("click")
+
+
 def _click_first_text(page, texts, log, timeout_ms=8000):
     """Thử bấm phần tử đầu tiên khớp 1 trong các chuỗi (button role hoặc text)."""
     for t in texts:
@@ -1212,9 +1278,10 @@ def _download_card(page, card, dst, log, timeout_ms=45000):
     if btn is None:
         raise RuntimeError("card chưa có nút Download preview")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    _close_blocking_modals(page, log)
     try:
         with page.expect_download(timeout=timeout_ms) as dl:
-            btn.click(timeout=8000)
+            _click_through(page, btn, log)
     except Exception:
         wall = _login_wall_text(page)
         if wall:
@@ -1365,6 +1432,7 @@ def _run_batch(page, pending, removal_type, batch_size,
     uploaded_any = False   # đã up ít nhất 1 đoạn -> mới cần giãn cách giữa các lần
 
     while (pending or in_flight) and not should_stop():
+        _close_blocking_modals(page, log)   # popup quảng cáo bật giữa chừng che cả trang
         # 1) Up bù cho đủ batch_size.
         while len(in_flight) < batch_size and pending and not should_stop():
             src, dst = pending.pop(0)
@@ -1528,6 +1596,7 @@ def process_videos(jobs, mode="auto", headless=False, per_video_timeout=300,
             # NHƯNG nếu nút xoá của vmake đổi (xoá không được) thì KHÔNG cố mãi (treo
             # cả phút) — dọn tối đa 2 lượt rồi CHẠY TIẾP (tải về đối chiếu theo TÊN).
             for _ in range(2):
+                _close_blocking_modals(page, log)
                 _clear_all_task_cards(page, log)
                 page.wait_for_timeout(1500)
                 if not _leaf_cards(page):
