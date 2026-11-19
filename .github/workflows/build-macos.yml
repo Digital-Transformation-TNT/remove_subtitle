@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       include_intel:
-        description: "Build thêm bản Intel x86_64 (runner macos-13 hay xếp hàng rất lâu)"
+        description: "Build thêm bản Intel x86_64 (runner macos-15-intel)"
         type: boolean
         default: false
   push:
@@ -52,8 +52,11 @@ jobs:
       # vô hạn — job cứ treo ở "queued" hàng ngày trời, làm cả run không bao giờ
       # kết thúc dù bản arm64 đã xong và artifact đã tải lên được.
       # Cần bản Intel thì bấm Run workflow rồi tick "include_intel".
+      # macos-14 bị GitHub NGỪNG: job arm64 bị huỷ ngay sau 1s, không chạy bước nào
+      # (11/2026) -> dùng macos-15 (arm64) / macos-15-intel. App vẫn chạy được trên
+      # macOS cũ vì mức tối thiểu do Python của setup-python quyết định, không do runner.
       matrix:
-        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.include_intel) && '[{"runner":"macos-14","arch":"arm64"},{"runner":"macos-13","arch":"intel"}]' || '[{"runner":"macos-14","arch":"arm64"}]') }}
+        include: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.include_intel) && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"intel"}]' || '[{"runner":"macos-15","arch":"arm64"}]') }}
     steps:
       - uses: actions/checkout@v4
 
