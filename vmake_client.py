@@ -1415,6 +1415,28 @@ def _handle_one_done_card(page, in_flight, log):
     return None
 
 
+PROGRESS_CAP = 4   # đoạn còn tiến triển được chờ tối đa 4 lần timeout kể từ lúc up
+_PROGRESS_RX = re.compile(r"process\w*\W{0,5}(\d{1,3})\s*%", re.I)
+_PCT_RX = re.compile(r"(\d{1,3})\s*%")
+
+
+def _card_progress(page, name):
+    """% xử lý vmake đang hiện trên card của đoạn `name` (vd 'Processing... 71%'),
+    None nếu không đọc được."""
+    card = _leaf_card_by_name(page, name)
+    if card is None:
+        return None
+    try:
+        txt = card.inner_text() or ""
+    except Exception:
+        return None
+    m = _PROGRESS_RX.search(txt) or _PCT_RX.search(txt)
+    if not m:
+        return None
+    v = int(m.group(1))
+    return v if 0 < v <= 100 else None
+
+
 def _run_batch(page, pending, removal_type, batch_size,
                per_video_timeout, delay_min, delay_max, log, should_stop):
     """
@@ -1517,7 +1539,17 @@ def _run_batch(page, pending, removal_type, batch_size,
         #    lý sau cùng), rồi nghỉ ngắn trước khi poll tiếp.
         now = time.time()
         for name, info in list(in_flight.items()):
-            if now - info["t0"] <= per_video_timeout:
+            if now - info.get("t_prog", info["t0"]) <= per_video_timeout:
+                continue
+            # vmake (xử lý phía máy chủ) có lúc rất CHẬM nhưng VẪN CHẠY: % trên card
+            # còn tăng so với lần xét trước -> chờ thêm 1 lượt timeout thay vì xoá &
+            # up lại (up lại = xếp hàng lại từ đầu, càng lâu). Chặn trần
+            # PROGRESS_CAP lần timeout để card treo thật không giữ chỗ mãi.
+            pct = _card_progress(page, name)
+            if (pct and pct != info.get("pct")
+                    and now - info["t0"] < PROGRESS_CAP * per_video_timeout):
+                info["pct"], info["t_prog"] = pct, now
+                log(f"  '{name}' vmake chậm nhưng vẫn chạy ({pct}%) — chờ thêm.")
                 continue
             attempts[name] = attempts.get(name, 0) + 1
             log(f"  '{name}' quá lâu (>{int(per_video_timeout)}s) "
