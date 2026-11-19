@@ -3,6 +3,7 @@ video_utils.py
 Các hàm tách (split) và ghép (merge) video bằng ffmpeg/ffprobe.
 """
 
+import json
 import os
 import re
 import shutil
@@ -165,6 +166,18 @@ def split_video(src, segments_root, seg_seconds=4.0,
     duration = ffprobe_duration(src, ffprobe)
     src_fps = _detect_fps(src, ffprobe)        # fps GỐC, lưu vào manifest để ghép dùng
     segs = compute_segments(duration, seg_seconds)
+
+    # Resume chỉ được dùng lại đoạn cũ khi CHẮC là của ĐÚNG video này. Trước đây chỉ
+    # xét TÊN -> chạy 2 video khác nhau cùng tên '1.mp4' vào cùng thư mục output thì
+    # video sau dùng lại đoạn của video trước (sai nội dung, lệch kích thước -> ghép
+    # chết 'Input link ... do not match'). Đổi nguồn -> xoá đoạn cũ, báo `reset`.
+    fp = _source_fingerprint(src, duration, seg_seconds, ffprobe)
+    reset = _check_segments_source(vdir, fp, ffprobe, log)
+    try:
+        with open(os.path.join(vdir, SOURCE_INFO), "w", encoding="utf-8") as f:
+            json.dump(fp, f, ensure_ascii=False)
+    except OSError:
+        pass
     log(f"  Thời lượng {duration:.2f}s, {src_fps}fps -> {len(segs)} đoạn")
 
     enc = ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
@@ -217,7 +230,56 @@ def split_video(src, segments_root, seg_seconds=4.0,
         "duration": duration,
         "fps": src_fps,
         "segments": seg_records,
+        "reset": reset,       # True -> caller phải xoá cả bản đã xử lý (processed/<safe>)
     }
+
+
+SOURCE_INFO = "_source.json"   # dấu vân tay video gốc của thư mục đoạn
+
+
+def _source_fingerprint(src, duration, seg_seconds, ffprobe):
+    """Đặc điểm nhận dạng video gốc + cách cắt — đổi bất kỳ cái nào thì đoạn cũ vô hiệu."""
+    w, h = _detect_size(src, ffprobe)
+    try:
+        size = os.path.getsize(src)
+    except OSError:
+        size = None
+    return {"size": size, "duration": round(float(duration), 3), "w": w, "h": h,
+            "seg_seconds": float(seg_seconds)}
+
+
+def _check_segments_source(vdir, fp, ffprobe, log):
+    """
+    Đoạn sẵn có trong vdir có thuộc video gốc `fp` không? Không -> xoá hết, trả True.
+    Thư mục cũ CHƯA có dấu vân tay (bản tool trước): đối chiếu kích thước khung của
+    đoạn đầu với video gốc — khớp thì giữ (khỏi bắt người dùng xử lý lại vmake).
+    """
+    olds = [f for f in os.listdir(vdir) if f.lower().endswith(".mp4")]
+    if not olds:
+        return False
+    same = False
+    info_path = os.path.join(vdir, SOURCE_INFO)
+    if os.path.exists(info_path):
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                same = json.load(f) == fp
+        except (OSError, ValueError):
+            same = False
+    else:
+        first = os.path.join(vdir, sorted(olds)[0])
+        # so KHÔNG xét thứ tự cạnh: video quay điện thoại có cờ xoay -> gốc báo
+        # 1280x720 còn đoạn đã cắt (đã xoay) là 720x1280.
+        sz = _detect_size(first, ffprobe)
+        same = fp["w"] is not None and sorted(sz) == sorted((fp["w"], fp["h"]))
+    if same:
+        return False
+    log("  Đoạn cũ trong thư mục output là của VIDEO KHÁC cùng tên — xoá và cắt lại.")
+    for f in olds:
+        try:
+            os.remove(os.path.join(vdir, f))
+        except OSError:
+            pass
+    return True
 
 
 # ----------------------------------------------------------------------------
@@ -478,6 +540,25 @@ def merge_segments(seg_files, out_path, ffmpeg="ffmpeg", ffprobe="ffprobe",
     #    '[i:a] matches no streams'.
     head_drop = align[2] if align is not None else 0     # số frame đầu vmake bỏ mỗi đoạn
     have_audio = [_has_audio(p, ffprobe) for p in seg_files]
+
+    # concat bắt MỌI đoạn cùng kích thước. Bình thường vmake giữ nguyên kích thước nên
+    # KHÔNG scale gì (giữ đúng hướng/khung gốc). Đoạn nào LỆCH (vd file sót từ video
+    # khác) thì đưa về kích thước GỐC thay vì để ffmpeg chết 'Input link ... do not
+    # match' làm hỏng cả video.
+    # Chuẩn = ĐOẠN GỐC tool tự cắt (đã xoay đúng hướng như bản vmake trả), KHÔNG lấy
+    # video gốc: video quay điện thoại có cờ xoay -> ffprobe báo khung CHƯA xoay
+    # (1280x720 thay vì 720x1280) -> scale nhầm sẽ bóp méo cả video.
+    ref = next((a for a in (audio_files or []) if a and os.path.exists(a)), seg_files[0])
+    tw, th = _detect_size(ref, ffprobe)
+    fix_size = {}
+    if tw and th:
+        for i, p in enumerate(seg_files):
+            sz = _detect_size(p, ffprobe)
+            if sz[0] and sz != (tw, th):
+                fix_size[i] = f"scale={tw}:{th},"
+        if fix_size:
+            log(f"  (CẢNH BÁO: đoạn {sorted(fix_size)} lệch kích thước so với gốc "
+                f"{tw}x{th} — đưa về kích thước gốc để ghép được.)")
     graft = {}          # i -> chỉ số input phụ (nguồn tiếng gốc)
     extra_inputs = []   # các file audio gốc thêm vào sau seg_files
     for i, ok in enumerate(have_audio):
@@ -508,7 +589,7 @@ def merge_segments(seg_files, out_path, ffmpeg="ffmpeg", ffprobe="ffprobe",
             vchain = f"fps={fps},trim=start_frame=0:end_frame={L}"
             if pad:                              # chèn freeze ở đầu video (frame gốc đã mất)
                 vchain += f",tpad=start_mode=clone:start_duration={pad / fps:.4f}"
-            parts.append(f"[{i}:v]{vchain},format=yuv420p,setsar=1,"
+            parts.append(f"[{i}:v]{vchain},{fix_size.get(i, '')}format=yuv420p,setsar=1,"
                          f"setpts=PTS-STARTPTS[v{i}]")
             # audio: cắt đúng thời lượng tương ứng; đoạn đầu đệm im lặng phần freeze.
             if have_audio[i]:
@@ -533,7 +614,7 @@ def merge_segments(seg_files, out_path, ffmpeg="ffmpeg", ffprobe="ffprobe",
         for i, p in enumerate(seg_files):
             d = durations[i] if (durations and i < len(durations) and durations[i]) else None
             vt = f"trim=0:{float(d):.4f}," if d else ""
-            parts.append(f"[{i}:v]{vt}fps={fps},format=yuv420p,setsar=1,"
+            parts.append(f"[{i}:v]{vt}fps={fps},{fix_size.get(i, '')}format=yuv420p,setsar=1,"
                          f"setpts=PTS-STARTPTS[v{i}]")
             if have_audio[i]:
                 at = f"atrim=0:{float(d):.4f}," if d else ""

@@ -15,6 +15,7 @@ Cấu hình được lưu tại:  ~/.tnt_video_tool/config.json
 
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -244,6 +245,9 @@ class PipelineWorker(QThread):
                     ffmpeg=ffmpeg, ffprobe=ffprobe,
                     log=self.log, should_stop=self.should_stop,
                 )
+                if rec.pop("reset", False):
+                    # Đoạn cũ là của video khác cùng tên -> bản vmake đã xử lý cũng sai.
+                    shutil.rmtree(os.path.join(proc_root, rec["safe"]), ignore_errors=True)
                 manifest["videos"].append(rec)
                 self.sig_progress.emit(vi, len(videos))
             with open(manifest_path, "w", encoding="utf-8") as f:

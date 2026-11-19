@@ -36,6 +36,8 @@ jobs:
           ffmpeg -version | head -3
       - name: Chạy merge smoke test
         run: python tests/test_merge_smoke.py
+      - name: Chạy test chống dùng lại nhầm đoạn cũ
+        run: python tests/test_resume_guard.py
 
   build:
     name: Build ${{ matrix.arch }} (${{ matrix.runner }})
